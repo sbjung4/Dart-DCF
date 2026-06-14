@@ -333,10 +333,11 @@ def _extract_financials_from_items(items):
     }
 
 
-def get_financial_statements(corp_code, year, api_key, report_type='11011'):
+def get_financial_statements(corp_code, year, api_key, report_type='11011', fs_div='CFS'):
     """
     Fetch financial statements from DART API.
     report_type: 11011=사업보고서, 11012=반기보고서, 11013=1분기, 11014=3분기
+    fs_div: CFS=연결, OFS=개별
     """
     key = get_dart_api_key(api_key)
     url = f"{BASE_URL}/fnlttSinglAcntAll.json"
@@ -346,7 +347,7 @@ def get_financial_statements(corp_code, year, api_key, report_type='11011'):
         "corp_code": corp_code,
         "bsns_year": str(year),
         "reprt_code": report_type,
-        "fs_div": "CFS",  # Consolidated financial statements
+        "fs_div": fs_div,
     }
 
     resp = requests.get(url, params=params, timeout=30)
@@ -354,8 +355,9 @@ def get_financial_statements(corp_code, year, api_key, report_type='11011'):
     data = resp.json()
 
     if data.get('status') == '013':
-        # No data for consolidated; try OFS (separate)
-        params['fs_div'] = 'OFS'
+        # No data for requested fs_div; try the other
+        fallback = 'OFS' if fs_div == 'CFS' else 'CFS'
+        params['fs_div'] = fallback
         resp = requests.get(url, params=params, timeout=30)
         resp.raise_for_status()
         data = resp.json()
