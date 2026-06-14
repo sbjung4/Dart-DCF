@@ -164,7 +164,7 @@ if page == '기업 검색':
 
         col1, col2 = st.columns([1, 2])
         with col1:
-            base_year = st.selectbox("기준연도", [2023, 2022, 2021, 2020], index=0)
+            base_year = st.selectbox("기준연도", [2025, 2024, 2023, 2022, 2021, 2020], index=0)
             st.session_state.base_year = base_year
 
         with col2:
