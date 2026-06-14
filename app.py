@@ -65,17 +65,17 @@ def fmt_df(df):
     return df.map(lambda x: fmt_억(x) if isinstance(x, (int, float)) and x != 0 else ('-' if x == 0 else x))
 
 def calc_korea_corp_tax_rate(taxable_income_억: float) -> float:
-    """2026 Korea progressive corporate tax rate (법인세법 기준, 2023년 개정 후 유지)."""
+    """2026년 이후 한국 법인세 누진세율 (국세청 기준, 영리법인)."""
     if taxable_income_억 <= 0:
-        return 0.22
+        return 0.25
     if taxable_income_억 <= 2:
-        tax = taxable_income_억 * 0.09
+        tax = taxable_income_억 * 0.10
     elif taxable_income_억 <= 200:
-        tax = 2 * 0.09 + (taxable_income_억 - 2) * 0.19
+        tax = 2 * 0.10 + (taxable_income_억 - 2) * 0.20
     elif taxable_income_억 <= 3000:
-        tax = 2 * 0.09 + 198 * 0.19 + (taxable_income_억 - 200) * 0.21
+        tax = 2 * 0.10 + 198 * 0.20 + (taxable_income_억 - 200) * 0.22
     else:
-        tax = 2 * 0.09 + 198 * 0.19 + 2800 * 0.21 + (taxable_income_억 - 3000) * 0.24
+        tax = 2 * 0.10 + 198 * 0.20 + 2800 * 0.22 + (taxable_income_억 - 3000) * 0.25
     return tax / taxable_income_억
 
 def extract_historical_summary(financial_data: dict, years: list) -> dict:
@@ -766,12 +766,14 @@ elif page == 'DCF 가정 입력':
 
     if asmp['tax_method'] == 'progressive':
         st.markdown("""
-| 과세표준 | 세율 |
-|---|---|
-| 2억원 이하 | 9% |
-| 2억 ~ 200억 | 19% |
-| 200억 ~ 3,000억 | 21% |
-| 3,000억 초과 | 24% |
+| 과세표준 | 세율 | 누진공제 |
+|---|---|---|
+| 2억원 이하 | 10% | - |
+| 2억 ~ 200억 | 20% | 2,000만원 |
+| 200억 ~ 3,000억 | 22% | 42,000만원 |
+| 3,000억 초과 | 25% | 942,000만원 |
+
+*2026년 이후 적용 세율 (국세청)*
 """)
         ebit_억 = hist['ebit'].get(base_year, 0) / 1e8
         prog_rate = calc_korea_corp_tax_rate(ebit_억) * 100
