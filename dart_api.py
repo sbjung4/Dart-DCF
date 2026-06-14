@@ -178,6 +178,26 @@ ACCOUNT_MAP = {
         'dart_CashAndCashEquivalents',
         'CashAndCashEquivalents',
     ],
+    # DSO/DIO/DPO 계산에 필요한 운전자본 항목
+    'accounts_receivable': [
+        'ifrs-full_TradeAndOtherCurrentReceivables',
+        'ifrs-full_TradeAndOtherReceivables',
+        'dart_TradeReceivables',
+        'TradeAndOtherCurrentReceivables',
+        'TradeReceivables',
+    ],
+    'inventory': [
+        'ifrs-full_Inventories',
+        'dart_Inventories',
+        'Inventories',
+    ],
+    'accounts_payable': [
+        'ifrs-full_TradeAndOtherCurrentPayables',
+        'ifrs-full_TradeAndOtherPayables',
+        'dart_TradePayables',
+        'TradeAndOtherCurrentPayables',
+        'TradePayables',
+    ],
     'total_equity': [
         'ifrs-full_Equity',
         'dart_Equity',
@@ -288,6 +308,9 @@ def _extract_financials_from_items(items):
     current_liabilities = _lookup_account(bs_map, ACCOUNT_MAP['current_liabilities'])
     cash = _lookup_account(bs_map, ACCOUNT_MAP['cash'])
     total_equity = _lookup_account(bs_map, ACCOUNT_MAP['total_equity'])
+    accounts_receivable = _lookup_account(bs_map, ACCOUNT_MAP['accounts_receivable'])
+    inventory = _lookup_account(bs_map, ACCOUNT_MAP['inventory'])
+    accounts_payable = _lookup_account(bs_map, ACCOUNT_MAP['accounts_payable'])
 
     # Total debt: try borrowings first, then sum short+long term
     total_debt = _lookup_account(bs_map, ACCOUNT_MAP['total_borrowings'])
@@ -322,6 +345,9 @@ def _extract_financials_from_items(items):
             'cash': cash,
             'total_equity': total_equity,
             'total_debt': total_debt,
+            'accounts_receivable': accounts_receivable,
+            'inventory': inventory,
+            'accounts_payable': accounts_payable,
         },
         'cash_flow': {
             'operating_cf': operating_cf,

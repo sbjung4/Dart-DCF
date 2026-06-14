@@ -239,26 +239,38 @@ class DCFModel:
     # ------------------------------------------------------------------
 
     def project_capex(self, da_series: pd.Series, revenue_df: Optional[pd.DataFrame] = None) -> pd.Series:
-        """Returns Series of CapEx (positive = outflow)."""
+        """
+        Returns Series of total CapEx (positive = outflow).
+        총 CAPEX = 유지보수 CAPEX (capex_method) + 신규투자 CAPEX (new_invest_capex_fixed)
+        """
         method = self._a("capex_method", "equal_da")
 
+        # 유지보수 CAPEX: 기존 자산 유지에 필요한 최소 투자
         if method == "equal_da":
-            return pd.Series(da_series.values, name="capex")
-
-        if method == "pct_revenue":
+            maint = pd.Series(da_series.values, name="capex")
+        elif method == "pct_revenue":
             if revenue_df is None:
                 raise ValueError("revenue_df required for capex_method='pct_revenue'")
             pct = self._a("capex_pct")
             if pct is None:
                 base_rev = self._b("revenue") or 1.0
                 pct = self._b("capex") / base_rev
-            return pd.Series(revenue_df["revenue"].values * float(pct), name="capex")
-
-        if method == "fixed":
+            maint = pd.Series(revenue_df["revenue"].values * float(pct), name="capex")
+        elif method == "fixed":
             val = float(self._a("capex_fixed") or self._b("capex"))
-            return pd.Series([val] * self.n, name="capex")
+            maint = pd.Series([val] * self.n, name="capex")
+        else:
+            raise ValueError(f"Unknown capex_method: {method}")
 
-        raise ValueError(f"Unknown capex_method: {method}")
+        # 신규투자 CAPEX: 성장을 위한 추가 투자 (연간 고정액)
+        new_invest = float(self._a("new_invest_capex_fixed") or 0.0)
+        # 신규투자 CAPEX를 매출 대비 비율로도 지정 가능
+        new_invest_pct = self._a("new_invest_capex_pct")
+        if new_invest_pct is not None and revenue_df is not None:
+            new_invest = revenue_df["revenue"].values * float(new_invest_pct)
+            return pd.Series(maint.values + new_invest, name="capex")
+
+        return pd.Series(maint.values + new_invest, name="capex")
 
     # ------------------------------------------------------------------
     # NWC change
