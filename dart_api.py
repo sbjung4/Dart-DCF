@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 BASE_URL = "https://opendart.fss.or.kr/api"
-CACHE_DIR = Path("/home/user/Dart-DCF")
+CACHE_DIR = Path(__file__).parent
 CORP_CODE_CACHE = CACHE_DIR / "corp_codes.parquet"
 
 
