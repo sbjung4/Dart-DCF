@@ -568,13 +568,23 @@ elif page == 'DCF 가정 입력':
 
         # Preview WACC
         try:
+            wacc_preview_asmp = {
+                'tax_rate': asmp.get('tax_rate', 25.0) / 100.0,
+                'cost_of_debt': asmp.get('cost_of_debt', 4.5) / 100.0,
+                'risk_free_rate': asmp.get('risk_free_rate', 3.5) / 100.0,
+                'beta': asmp.get('beta', 1.0),
+                'equity_risk_premium': asmp.get('equity_risk_premium', 5.0) / 100.0,
+                'cost_of_equity': (asmp['cost_of_equity'] / 100.0) if 'cost_of_equity' in asmp else None,
+                'debt_weight': asmp.get('debt_weight', 30.0) / 100.0,
+                'equity_weight': 1.0 - asmp.get('debt_weight', 30.0) / 100.0,
+            }
             hist_data_for_wacc = {
                 'total_debt': hist['total_debt'].get(base_year, 0),
                 'total_equity': hist['total_equity'].get(base_year, 0),
             }
-            temp_model = DCFModel(hist_data_for_wacc, asmp)
+            temp_model = DCFModel(hist_data_for_wacc, wacc_preview_asmp)
             preview_wacc = temp_model.calculate_wacc() * 100
-            kd_after = asmp['cost_of_debt'] * (1 - asmp['tax_rate']/100)
+            kd_after = asmp['cost_of_debt'] * (1 - asmp['tax_rate'] / 100)
             st.success(f"계산된 WACC = **{preview_wacc:.2f}%**")
             st.caption(f"세후 Kd = {kd_after:.2f}%")
         except Exception as e:
@@ -640,17 +650,40 @@ elif page == 'DCF 결과':
     }
 
     try:
+        # Convert percentage inputs to decimals for DCFModel
+        model_asmp = asmp.copy()
+        for pct_key in ('tax_rate', 'risk_free_rate', 'equity_risk_premium',
+                        'cost_of_debt', 'cost_of_equity',
+                        'cogs_pct', 'sga_pct', 'da_pct', 'capex_pct', 'nwc_pct',
+                        'terminal_growth_rate'):
+            if pct_key in model_asmp and model_asmp[pct_key] is not None:
+                model_asmp[pct_key] = model_asmp[pct_key] / 100.0
+        if 'debt_weight' in model_asmp:
+            model_asmp['debt_weight'] = model_asmp['debt_weight'] / 100.0
+            model_asmp['equity_weight'] = 1.0 - model_asmp['debt_weight']
+        if 'revenue_total' in model_asmp:
+            rt = model_asmp['revenue_total']
+            rt['growth_rates'] = [g / 100.0 for g in rt.get('growth_rates', [])]
+        if 'revenue_segments' in model_asmp:
+            for seg in model_asmp['revenue_segments']:
+                seg['growth_rates'] = [g / 100.0 for g in seg.get('growth_rates', [])]
+        for list_key in ('cogs_growth', 'sga_growth', 'da_growth'):
+            if list_key in model_asmp:
+                model_asmp[list_key] = [g / 100.0 for g in model_asmp[list_key]]
+        model_asmp['tgr'] = model_asmp.pop('terminal_growth_rate', 0.015)
+        model_asmp['net_debt'] = hist_data['total_debt'] - hist_data['cash']
+
         with st.spinner("DCF 계산 중..."):
-            model = DCFModel(hist_data, asmp)
+            model = DCFModel(hist_data, model_asmp)
             results = model.calculate_ev()
 
         fcff_df = results['fcff_df']
         wacc = results['wacc']
-        pv_fcff_by_year = results['pv_fcff_by_year']
+        pv_fcff_df = results['pv_fcff_by_year']   # DataFrame: year, fcff, discount_factor, pv_fcff
         pv_tv = results['pv_tv']
-        tv = results['tv']
+        tv = results['terminal_value']
         ev = results['ev']
-        total_pv_fcff = results['total_pv_fcff']
+        total_pv_fcff = float(np.sum(results['pv_fcffs']))
 
         net_debt = hist_data['total_debt'] - hist_data['cash']
         eq_val = model.equity_value(ev)
@@ -677,19 +710,19 @@ elif page == 'DCF 결과':
         # ── FCFF Projection Table ─────────────────────────────────────────
         st.subheader("FCFF 추정 (단위: 억원)")
         display_rows = []
-        for yr in fcff_df.index:
-            df_factor = results['discount_factors'][yr]
+        for i, row_data in fcff_df.iterrows():
+            pv_row = pv_fcff_df.iloc[i]
             row = {
-                '연도': str(yr),
-                '매출액': fmt_억(fcff_df.loc[yr, 'Revenue']),
-                '영업이익': fmt_억(fcff_df.loc[yr, 'EBIT']),
-                'EBIT(1-t)': fmt_억(fcff_df.loc[yr, 'EBIT_after_tax']),
-                'D&A': fmt_억(fcff_df.loc[yr, 'DA']),
-                'CapEx': fmt_억(fcff_df.loc[yr, 'CapEx']),
-                'ΔNWC': fmt_억(fcff_df.loc[yr, 'Delta_NWC']),
-                'FCFF': fmt_억(fcff_df.loc[yr, 'FCFF']),
-                '할인계수': f"{df_factor:.4f}",
-                'PV(FCFF)': fmt_억(pv_fcff_by_year[yr]),
+                '연도': str(int(row_data['year'])),
+                '매출액': fmt_억(row_data['revenue']),
+                '영업이익': fmt_억(row_data['ebit']),
+                'EBIT(1-t)': fmt_억(row_data['nopat']),
+                'D&A': fmt_억(row_data['da']),
+                'CapEx': fmt_억(row_data['capex']),
+                'ΔNWC': fmt_억(row_data['delta_nwc']),
+                'FCFF': fmt_억(row_data['fcff']),
+                '할인계수': f"{pv_row['discount_factor']:.4f}",
+                'PV(FCFF)': fmt_억(pv_row['pv_fcff']),
             }
             display_rows.append(row)
 
@@ -729,9 +762,10 @@ elif page == 'DCF 결과':
 
         # ── Waterfall Chart ────────────────────────────────────────────────
         st.subheader("EV 구성 폭포 차트")
-        years_proj = list(fcff_df.index)
-        waterfall_labels = [f"PV(FCFF {yr})" for yr in years_proj] + ["PV(TV)", "EV"]
-        waterfall_values = [pv_fcff_by_year[yr] / 1e8 for yr in years_proj] + [pv_tv / 1e8, None]
+        years_proj = fcff_df['year'].tolist()
+        pv_fcff_list = pv_fcff_df['pv_fcff'].tolist()
+        waterfall_labels = [f"PV(FCFF {int(yr)})" for yr in years_proj] + ["PV(TV)", "EV"]
+        waterfall_values = [v / 1e8 for v in pv_fcff_list] + [pv_tv / 1e8, None]
         waterfall_measures = ["relative"] * len(years_proj) + ["relative", "total"]
 
         fig_wf = go.Figure(go.Waterfall(
@@ -763,9 +797,10 @@ elif page == 'DCF 결과':
         tgr_range_dec = [t/100 for t in tgr_range]
 
         with st.spinner("민감도 분석 계산 중..."):
-            sens_df = model.sensitivity_analysis(wacc_range_dec, tgr_range_dec)
+            sens_metric = 'price_per_share' if shares > 0 else 'ev'
+            sens_df = model.sensitivity_analysis(wacc_range_dec, tgr_range_dec, metric=sens_metric)
 
-        st.write("**주당가치 민감도 (원)**")
+        st.write(f"**{'주당가치 민감도 (원)' if shares > 0 else 'EV 민감도 (억원)'}**")
 
         # Format as integer for display
         sens_display = sens_df.applymap(lambda x: f"{x:,.0f}" if x is not None and not np.isnan(x) else "N/A")
