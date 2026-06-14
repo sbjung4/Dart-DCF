@@ -65,7 +65,7 @@ def fmt_df(df):
     return df.map(lambda x: fmt_억(x) if isinstance(x, (int, float)) and x != 0 else ('-' if x == 0 else x))
 
 def calc_korea_corp_tax_rate(taxable_income_억: float) -> float:
-    """2024 Korea progressive corporate tax rate."""
+    """2026 Korea progressive corporate tax rate (법인세법 기준, 2023년 개정 후 유지)."""
     if taxable_income_억 <= 0:
         return 0.22
     if taxable_income_억 <= 2:
@@ -760,9 +760,9 @@ elif page == 'DCF 가정 입력':
     # ── Tax Rate ──────────────────────────────────────────────────────────────
     st.subheader("5. 세율")
 
-    tax_method = st.radio("세율 방법", ['누진세율 자동계산 (2024 한국)', '직접 입력'], horizontal=True,
+    tax_method = st.radio("세율 방법", ['누진세율 자동계산 (2026 한국)', '직접 입력'], horizontal=True,
                           index=0 if asmp.get('tax_method','progressive')=='progressive' else 1)
-    asmp['tax_method'] = 'progressive' if tax_method == '누진세율 자동계산 (2024 한국)' else 'direct'
+    asmp['tax_method'] = 'progressive' if tax_method == '누진세율 자동계산 (2026 한국)' else 'direct'
 
     if asmp['tax_method'] == 'progressive':
         st.markdown("""
