@@ -245,6 +245,42 @@ ACCOUNT_MAP = {
         'PurchaseOfPropertyPlantAndEquipment',
         'ifrs-full_AcquisitionOfPropertyPlantAndEquipment',
     ],
+    # Individual D&A components
+    'da_ppe': [
+        'ifrs-full_DepreciationOfPropertyPlantAndEquipment',
+        'dart_DepreciationOfPropertyPlantAndEquipment',
+        'DepreciationOfPropertyPlantAndEquipment',
+    ],
+    'da_intangible': [
+        'ifrs-full_AmortisationOfIntangibleAssets',
+        'dart_AmortisationOfIntangibleAssets',
+        'AmortisationOfIntangibleAssets',
+    ],
+    'da_rou': [
+        'ifrs-full_DepreciationRightOfUseAssets',
+        'dart_DepreciationRightOfUseAssets',
+        'ifrs-full_DepreciationOfRightOfUseAssets',
+        'DepreciationRightOfUseAssets',
+    ],
+    # SGA breakdown
+    'selling_expense': [
+        'ifrs-full_SellingExpense',
+        'dart_SellingExpense',
+        'SellingExpense',
+    ],
+    'admin_expense': [
+        'ifrs-full_AdministrativeExpense',
+        'dart_AdministrativeExpense',
+        'AdministrativeExpense',
+    ],
+    # Shares outstanding (in balance sheet / equity items)
+    'shares_outstanding': [
+        'ifrs-full_NumberOfSharesOutstanding',
+        'dart_NumberOfSharesOutstanding',
+        'NumberOfSharesOutstanding',
+        'dart_CommonStockSharesIssued',
+        'ifrs-full_NumberOfSharesIssuedAndFullyPaid',
+    ],
 }
 
 
@@ -298,9 +334,29 @@ def _extract_financials_from_items(items):
     net_income = _lookup_account(is_map, ACCOUNT_MAP['net_income'])
     da_is = _lookup_account(is_map, ACCOUNT_MAP['da'])
 
+    # SGA breakdown from IS
+    selling_expense = _lookup_account(is_map, ACCOUNT_MAP['selling_expense'])
+    admin_expense = _lookup_account(is_map, ACCOUNT_MAP['admin_expense'])
+    # If SGA is 0 but selling+admin exist, compute SGA
+    if sga == 0 and (selling_expense + admin_expense) > 0:
+        sga = selling_expense + admin_expense
+
     # Try to find D&A in CF (often listed as adjustment item)
     da_cf = _lookup_account(cf_map, ACCOUNT_MAP['da'])
-    da = da_cf if da_cf > 0 else da_is
+
+    # Try individual D&A components from CF statement
+    da_ppe = _lookup_account(cf_map, ACCOUNT_MAP['da_ppe'])
+    da_intangible = _lookup_account(cf_map, ACCOUNT_MAP['da_intangible'])
+    da_rou = _lookup_account(cf_map, ACCOUNT_MAP['da_rou'])
+    da_components = da_ppe + da_intangible + da_rou
+
+    # Best estimate: components sum > combined CF > IS
+    if da_components > 0:
+        da = da_components
+    elif da_cf > 0:
+        da = da_cf
+    else:
+        da = da_is
 
     # Extract BS metrics
     total_assets = _lookup_account(bs_map, ACCOUNT_MAP['total_assets'])
@@ -311,6 +367,7 @@ def _extract_financials_from_items(items):
     accounts_receivable = _lookup_account(bs_map, ACCOUNT_MAP['accounts_receivable'])
     inventory = _lookup_account(bs_map, ACCOUNT_MAP['inventory'])
     accounts_payable = _lookup_account(bs_map, ACCOUNT_MAP['accounts_payable'])
+    shares_outstanding = _lookup_account(bs_map, ACCOUNT_MAP['shares_outstanding'])
 
     # Total debt: try borrowings first, then sum short+long term
     total_debt = _lookup_account(bs_map, ACCOUNT_MAP['total_borrowings'])
@@ -337,6 +394,11 @@ def _extract_financials_from_items(items):
             'tax_expense': tax_expense,
             'net_income': net_income,
             'da': da,
+            'selling_expense': selling_expense,
+            'admin_expense': admin_expense,
+            'da_ppe': da_ppe,
+            'da_intangible': da_intangible,
+            'da_rou': da_rou,
         },
         'balance_sheet': {
             'total_assets': total_assets,
@@ -348,6 +410,7 @@ def _extract_financials_from_items(items):
             'accounts_receivable': accounts_receivable,
             'inventory': inventory,
             'accounts_payable': accounts_payable,
+            'shares_outstanding': shares_outstanding,
         },
         'cash_flow': {
             'operating_cf': operating_cf,
