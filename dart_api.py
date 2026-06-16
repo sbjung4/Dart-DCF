@@ -284,11 +284,44 @@ ACCOUNT_MAP = {
 }
 
 
-def _lookup_account(account_map_by_id, category_keys):
-    """Look up account value by trying multiple possible account IDs"""
+# Korean account_nm substring keywords used as a fallback when the XBRL
+# account_id tag is missing or non-standard (common for many DART filers).
+KOREAN_NAME_KEYWORDS = {
+    'sga': ['판매비와관리비', '판매비및관리비', '판매비와 관리비', '판관비'],
+    'selling_expense': ['판매비'],
+    'admin_expense': ['관리비'],
+    'da': ['감가상각비와무형자산상각비', '감가상각비및무형자산상각비'],
+    'da_ppe': ['유형자산상각비', '감가상각비'],
+    'da_intangible': ['무형자산상각비'],
+    'da_rou': ['사용권자산상각비', '리스자산상각비'],
+    'accounts_receivable': ['매출채권'],
+    'inventory': ['재고자산'],
+    'accounts_payable': ['매입채무'],
+    'shares_outstanding': ['발행주식수', '유통주식수', '보통주식수'],
+}
+
+
+def _normalize_account_nm(name):
+    return name.replace(' ', '').replace('\xa0', '').replace('　', '')
+
+
+def _lookup_account(account_map_by_id, category_keys, keywords=None):
+    """Look up account value by trying multiple possible account IDs first,
+    then falling back to a Korean account_nm substring match if provided."""
     for key in category_keys:
         if key in account_map_by_id:
-            return _safe_amount(account_map_by_id[key])
+            val = _safe_amount(account_map_by_id[key])
+            if val != 0:
+                return val
+    if keywords:
+        for name, raw_val in account_map_by_id.items():
+            if not isinstance(name, str):
+                continue
+            norm = _normalize_account_nm(name)
+            if any(kw in norm for kw in keywords):
+                val = _safe_amount(raw_val)
+                if val != 0:
+                    return val
     return 0.0
 
 
@@ -327,27 +360,27 @@ def _extract_financials_from_items(items):
     gross_profit = _lookup_account(is_map, ACCOUNT_MAP['gross_profit'])
     if gross_profit == 0 and revenue > 0 and cogs > 0:
         gross_profit = revenue - cogs
-    sga = _lookup_account(is_map, ACCOUNT_MAP['sga'])
+    sga = _lookup_account(is_map, ACCOUNT_MAP['sga'], KOREAN_NAME_KEYWORDS['sga'])
     ebit = _lookup_account(is_map, ACCOUNT_MAP['ebit'])
     pretax_income = _lookup_account(is_map, ACCOUNT_MAP['pretax_income'])
     tax_expense = _lookup_account(is_map, ACCOUNT_MAP['tax_expense'])
     net_income = _lookup_account(is_map, ACCOUNT_MAP['net_income'])
-    da_is = _lookup_account(is_map, ACCOUNT_MAP['da'])
+    da_is = _lookup_account(is_map, ACCOUNT_MAP['da'], KOREAN_NAME_KEYWORDS['da'])
 
     # SGA breakdown from IS
-    selling_expense = _lookup_account(is_map, ACCOUNT_MAP['selling_expense'])
-    admin_expense = _lookup_account(is_map, ACCOUNT_MAP['admin_expense'])
+    selling_expense = _lookup_account(is_map, ACCOUNT_MAP['selling_expense'], KOREAN_NAME_KEYWORDS['selling_expense'])
+    admin_expense = _lookup_account(is_map, ACCOUNT_MAP['admin_expense'], KOREAN_NAME_KEYWORDS['admin_expense'])
     # If SGA is 0 but selling+admin exist, compute SGA
     if sga == 0 and (selling_expense + admin_expense) > 0:
         sga = selling_expense + admin_expense
 
     # Try to find D&A in CF (often listed as adjustment item)
-    da_cf = _lookup_account(cf_map, ACCOUNT_MAP['da'])
+    da_cf = _lookup_account(cf_map, ACCOUNT_MAP['da'], KOREAN_NAME_KEYWORDS['da'])
 
     # Try individual D&A components from CF statement
-    da_ppe = _lookup_account(cf_map, ACCOUNT_MAP['da_ppe'])
-    da_intangible = _lookup_account(cf_map, ACCOUNT_MAP['da_intangible'])
-    da_rou = _lookup_account(cf_map, ACCOUNT_MAP['da_rou'])
+    da_ppe = _lookup_account(cf_map, ACCOUNT_MAP['da_ppe'], KOREAN_NAME_KEYWORDS['da_ppe'])
+    da_intangible = _lookup_account(cf_map, ACCOUNT_MAP['da_intangible'], KOREAN_NAME_KEYWORDS['da_intangible'])
+    da_rou = _lookup_account(cf_map, ACCOUNT_MAP['da_rou'], KOREAN_NAME_KEYWORDS['da_rou'])
     da_components = da_ppe + da_intangible + da_rou
 
     # Best estimate: components sum > combined CF > IS
@@ -364,10 +397,10 @@ def _extract_financials_from_items(items):
     current_liabilities = _lookup_account(bs_map, ACCOUNT_MAP['current_liabilities'])
     cash = _lookup_account(bs_map, ACCOUNT_MAP['cash'])
     total_equity = _lookup_account(bs_map, ACCOUNT_MAP['total_equity'])
-    accounts_receivable = _lookup_account(bs_map, ACCOUNT_MAP['accounts_receivable'])
-    inventory = _lookup_account(bs_map, ACCOUNT_MAP['inventory'])
-    accounts_payable = _lookup_account(bs_map, ACCOUNT_MAP['accounts_payable'])
-    shares_outstanding = _lookup_account(bs_map, ACCOUNT_MAP['shares_outstanding'])
+    accounts_receivable = _lookup_account(bs_map, ACCOUNT_MAP['accounts_receivable'], KOREAN_NAME_KEYWORDS['accounts_receivable'])
+    inventory = _lookup_account(bs_map, ACCOUNT_MAP['inventory'], KOREAN_NAME_KEYWORDS['inventory'])
+    accounts_payable = _lookup_account(bs_map, ACCOUNT_MAP['accounts_payable'], KOREAN_NAME_KEYWORDS['accounts_payable'])
+    shares_outstanding = _lookup_account(bs_map, ACCOUNT_MAP['shares_outstanding'], KOREAN_NAME_KEYWORDS['shares_outstanding'])
 
     # Total debt: try borrowings first, then sum short+long term
     total_debt = _lookup_account(bs_map, ACCOUNT_MAP['total_borrowings'])
