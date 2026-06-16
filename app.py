@@ -11,7 +11,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # API 키를 로컬 파일에 저장해두면 매번 입력할 필요 없이 다음 실행 시 자동으로 불러옵니다.
-_API_KEY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.dart_api_key')
+# (실행 위치에 따라 프로젝트 폴더에 쓰기 권한이 없을 수 있어 홈 디렉터리에 저장)
+_API_KEY_DIR = os.path.join(os.path.expanduser('~'), '.dart_dcf')
+_API_KEY_FILE = os.path.join(_API_KEY_DIR, 'api_key.txt')
 
 def _load_saved_api_key():
     if os.path.exists(_API_KEY_FILE):
@@ -24,10 +26,12 @@ def _load_saved_api_key():
 
 def _save_api_key(key):
     try:
+        os.makedirs(_API_KEY_DIR, exist_ok=True)
         with open(_API_KEY_FILE, 'w', encoding='utf-8') as f:
             f.write(key.strip())
+        return True
     except OSError:
-        pass
+        return False
 
 from dart_api import (
     search_company, get_company_info, get_financial_statements,
@@ -200,9 +204,13 @@ with st.sidebar:
     )
     if api_key_input and api_key_input != st.session_state.api_key:
         st.session_state.api_key = api_key_input
-        _save_api_key(api_key_input)
+        if not _save_api_key(api_key_input):
+            st.warning(f"API 키 자동저장 실패 (쓰기 권한 확인 필요: {_API_KEY_FILE})")
     elif api_key_input:
         st.session_state.api_key = api_key_input
+
+    if st.session_state.api_key:
+        st.caption(f"✅ 저장된 API 키 사용 중 (저장 위치: {_API_KEY_FILE})")
 
     st.divider()
     page = st.radio(
@@ -353,8 +361,6 @@ if page == '기업 검색':
                         sga = hist['sga'].get(base_year, 0)
                         cogs_pct = safe_div(cogs, latest_rev, 0.6) * 100
                         sga_pct = safe_div(sga, latest_rev, 0.2) * 100
-                        labor_pct = sga_pct * 0.5
-                        other_sga_pct = sga_pct * 0.5
                         da_pct = safe_div(latest_da, latest_rev, 0.03) * 100
                         capex_pct = safe_div(latest_capex, latest_rev, 0.03) * 100
                         nwc_pct = safe_div(latest_nwc, latest_rev, 0.1) * 100
@@ -393,10 +399,8 @@ if page == '기업 검색':
                             },
                             'cogs_method': 'pct_revenue',
                             'cogs_pct': round(cogs_pct, 1),
-                            'labor_method': 'pct_revenue',
-                            'labor_pct': round(labor_pct, 1),
-                            'other_sga_method': 'pct_revenue',
-                            'other_sga_pct': round(other_sga_pct, 1),
+                            'sga_method': 'pct_revenue',
+                            'sga_pct': round(sga_pct, 1),
                             'da_method': 'pct_revenue',
                             'da_pct': round(da_pct, 1),
                             'capex_method': 'equal_da',
@@ -653,15 +657,6 @@ elif page == 'DCF 가정 입력':
     st.markdown("**과거 비용 실적**")
     st.dataframe(pd.DataFrame(cost_hist), use_container_width=True)
 
-    # 별도 예측할 비용 항목 선택
-    cost_project_items = st.multiselect(
-        "별도 예측할 비용 항목 선택 (선택 없으면 COGS+SGA 합산)",
-        options=['매출원가(COGS)', '판매비(Selling)', '관리비(Admin)', '판관비합계(SGA)'],
-        default=asmp.get('cost_project_items', ['매출원가(COGS)', '판관비합계(SGA)']),
-        key='cost_project_items'
-    )
-    asmp['cost_project_items'] = cost_project_items
-
     # ── (A) 매출원가 (COGS) ──
     st.markdown("---")
     st.markdown("#### (A) 매출원가 (COGS)")
@@ -690,133 +685,40 @@ elif page == 'DCF 가정 입력':
                 cogs_growth_vals.append(cg)
         asmp['cogs_growth'] = cogs_growth_vals
 
-    # ── (B) 판매비와관리비 (SGA) ──
+    # ── (B) 판매비와관리비 (SGA) ── COGS와 동일한 구조 (매출 대비 비율 / 전년 대비 성장률)
     st.markdown("---")
     st.markdown("#### (B) 판매비와관리비 (SGA)")
+    st.caption("판관비 = 재무제표상 판매비와관리비 합계")
 
-    if '판매비(Selling)' in cost_project_items and '관리비(Admin)' in cost_project_items:
-        # 판매비, 관리비 별도 입력
-        st.caption("판매비와 관리비를 각각 입력합니다.")
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("**판매비(Selling)**")
-            selling_pct = st.number_input(
-                "판매비/매출 (%)",
-                value=float(asmp.get('selling_pct', safe_div(hist['selling_expense'].get(base_year, 0), hist['revenue'].get(base_year, 1), 0.05) * 100)),
-                min_value=0.0, max_value=50.0, step=0.1, key='selling_pct_input'
-            )
-            asmp['selling_pct'] = selling_pct
-        with col2:
-            st.markdown("**관리비(Admin)**")
-            admin_pct = st.number_input(
-                "관리비/매출 (%)",
-                value=float(asmp.get('admin_pct', safe_div(hist['admin_expense'].get(base_year, 0), hist['revenue'].get(base_year, 1), 0.05) * 100)),
-                min_value=0.0, max_value=50.0, step=0.1, key='admin_pct_input'
-            )
-            asmp['admin_pct'] = admin_pct
-        asmp['labor_method'] = 'pct_revenue'
-        asmp['labor_pct'] = selling_pct * 0.5
-        asmp['other_sga_method'] = 'pct_revenue'
-        asmp['other_sga_pct'] = admin_pct * 0.5
-        asmp['sga_method'] = 'pct_revenue'
-        asmp['sga_pct'] = selling_pct + admin_pct
-        labor_growth_vals = [3.0] * n
-        other_sga_growth_vals = [3.0] * n
-    elif '판관비합계(SGA)' in cost_project_items:
-        st.caption("판관비 = 인건비 + 기타 판매비·관리비 (향후 세부 항목 별도 설정 가능)")
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("**인건비**")
-            labor_method = st.radio("인건비 방법", ['매출 대비 비율 (%)', '전년 대비 성장률'], horizontal=True,
-                                    key='labor_method_radio',
-                                    index=0 if asmp.get('labor_method','pct_revenue')=='pct_revenue' else 1)
-            asmp['labor_method'] = 'pct_revenue' if labor_method == '매출 대비 비율 (%)' else 'growth'
-            labor_growth_vals = asmp.get('labor_growth', [3.0]*n)
-            if asmp['labor_method'] == 'pct_revenue':
-                asmp['labor_pct'] = st.number_input("인건비/매출 (%)", value=float(asmp.get('labor_pct', 10.0)), min_value=0.0, max_value=50.0, step=0.1)
-            else:
-                labor_growth_vals = []
-                prev_lg = asmp.get('labor_growth', [3.0]*n)
-                for i in range(n):
-                    lg = st.number_input(f"{proj_years[i]}년(%)", value=float(prev_lg[i] if i < len(prev_lg) else 3.0), step=0.5, key=f"labor_gr_{i}")
-                    labor_growth_vals.append(lg)
-                asmp['labor_growth'] = labor_growth_vals
+    sga_method = st.radio("SGA 방법", ['매출 대비 비율 (%)', '전년 대비 성장률'], horizontal=True,
+                          key='sga_method_radio',
+                          index=0 if asmp.get('sga_method','pct_revenue')=='pct_revenue' else 1)
+    asmp['sga_method'] = 'pct_revenue' if sga_method == '매출 대비 비율 (%)' else 'growth'
+    sga_growth_vals = asmp.get('sga_growth', [3.0]*n)
 
-        with col2:
-            st.markdown("**기타 판관비**")
-            other_sga_method = st.radio("기타판관비 방법", ['매출 대비 비율 (%)', '전년 대비 성장률'], horizontal=True,
-                                        key='other_sga_method_radio',
-                                        index=0 if asmp.get('other_sga_method','pct_revenue')=='pct_revenue' else 1)
-            asmp['other_sga_method'] = 'pct_revenue' if other_sga_method == '매출 대비 비율 (%)' else 'growth'
-            other_sga_growth_vals = asmp.get('other_sga_growth', [3.0]*n)
-            if asmp['other_sga_method'] == 'pct_revenue':
-                asmp['other_sga_pct'] = st.number_input("기타판관비/매출 (%)", value=float(asmp.get('other_sga_pct', 10.0)), min_value=0.0, max_value=30.0, step=0.1)
-            else:
-                other_sga_growth_vals = []
-                prev_og = asmp.get('other_sga_growth', [3.0]*n)
-                for i in range(n):
-                    og = st.number_input(f"{proj_years[i]}년(%)", value=float(prev_og[i] if i < len(prev_og) else 3.0), step=0.5, key=f"other_sga_gr_{i}")
-                    other_sga_growth_vals.append(og)
-                asmp['other_sga_growth'] = other_sga_growth_vals
-
-        # DCFModel에 넘길 sga_pct: 인건비 + 기타판관비 합산
-        if asmp['labor_method'] == 'pct_revenue' and asmp['other_sga_method'] == 'pct_revenue':
-            asmp['sga_method'] = 'pct_revenue'
-            asmp['sga_pct'] = asmp.get('labor_pct', 10.0) + asmp.get('other_sga_pct', 10.0)
-        else:
-            asmp['sga_method'] = 'growth'
-            asmp['sga_growth'] = [3.0]*n
+    if asmp['sga_method'] == 'pct_revenue':
+        asmp['sga_pct'] = st.number_input(
+            "SGA/매출 (%)",
+            value=float(asmp.get('sga_pct', safe_div(hist['sga'].get(base_year, 0), hist['revenue'].get(base_year, 1), 10.0) * 100 if hist['sga'].get(base_year, 0) else 10.0)),
+            min_value=0.0, max_value=100.0, step=0.1,
+            help="기준연도 실적 참고 후 향후 예상 비율 입력"
+        )
     else:
-        # 기본 SGA 합산 입력
-        st.caption("판관비 합계를 매출 대비 비율로 입력합니다.")
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("**인건비**")
-            labor_method = st.radio("인건비 방법", ['매출 대비 비율 (%)', '전년 대비 성장률'], horizontal=True,
-                                    key='labor_method_radio',
-                                    index=0 if asmp.get('labor_method','pct_revenue')=='pct_revenue' else 1)
-            asmp['labor_method'] = 'pct_revenue' if labor_method == '매출 대비 비율 (%)' else 'growth'
-            labor_growth_vals = asmp.get('labor_growth', [3.0]*n)
-            if asmp['labor_method'] == 'pct_revenue':
-                asmp['labor_pct'] = st.number_input("인건비/매출 (%)", value=float(asmp.get('labor_pct', 10.0)), min_value=0.0, max_value=50.0, step=0.1)
-            else:
-                labor_growth_vals = []
-                prev_lg = asmp.get('labor_growth', [3.0]*n)
-                for i in range(n):
-                    lg = st.number_input(f"{proj_years[i]}년(%)", value=float(prev_lg[i] if i < len(prev_lg) else 3.0), step=0.5, key=f"labor_gr_{i}")
-                    labor_growth_vals.append(lg)
-                asmp['labor_growth'] = labor_growth_vals
-        with col2:
-            st.markdown("**기타 판관비**")
-            other_sga_method = st.radio("기타판관비 방법", ['매출 대비 비율 (%)', '전년 대비 성장률'], horizontal=True,
-                                        key='other_sga_method_radio',
-                                        index=0 if asmp.get('other_sga_method','pct_revenue')=='pct_revenue' else 1)
-            asmp['other_sga_method'] = 'pct_revenue' if other_sga_method == '매출 대비 비율 (%)' else 'growth'
-            other_sga_growth_vals = asmp.get('other_sga_growth', [3.0]*n)
-            if asmp['other_sga_method'] == 'pct_revenue':
-                asmp['other_sga_pct'] = st.number_input("기타판관비/매출 (%)", value=float(asmp.get('other_sga_pct', 10.0)), min_value=0.0, max_value=30.0, step=0.1)
-            else:
-                other_sga_growth_vals = []
-                prev_og = asmp.get('other_sga_growth', [3.0]*n)
-                for i in range(n):
-                    og = st.number_input(f"{proj_years[i]}년(%)", value=float(prev_og[i] if i < len(prev_og) else 3.0), step=0.5, key=f"other_sga_gr_{i}")
-                    other_sga_growth_vals.append(og)
-                asmp['other_sga_growth'] = other_sga_growth_vals
-
-        if asmp['labor_method'] == 'pct_revenue' and asmp['other_sga_method'] == 'pct_revenue':
-            asmp['sga_method'] = 'pct_revenue'
-            asmp['sga_pct'] = asmp.get('labor_pct', 10.0) + asmp.get('other_sga_pct', 10.0)
-        else:
-            asmp['sga_method'] = 'growth'
-            asmp['sga_growth'] = [3.0]*n
+        sga_growth_vals = []
+        prev_sg = asmp.get('sga_growth', [3.0]*n)
+        cols = st.columns(n)
+        for i, col in enumerate(cols):
+            with col:
+                sg = col.number_input(f"{proj_years[i]}년 성장률(%)", value=float(prev_sg[i] if i < len(prev_sg) else 3.0), step=0.5, key=f"sga_gr_{i}")
+                sga_growth_vals.append(sg)
+        asmp['sga_growth'] = sga_growth_vals
 
     # 비용 미리보기 (연도를 열로 배치)
     st.markdown("**📊 비용 추정 미리보기 (억원)**")
     cost_preview = {}
     rev_v = base_rev_val
     cogs_v = hist['cogs'].get(base_year, 0)
-    labor_v = hist['sga'].get(base_year, 0) * 0.5
-    osga_v = hist['sga'].get(base_year, 0) * 0.5
+    sga_v = hist['sga'].get(base_year, 0)
     for i, g in enumerate(rev_growths):
         yr_label = str(proj_years[i])
         rev_v = rev_v * (1 + g / 100)
@@ -825,24 +727,18 @@ elif page == 'DCF 가정 입력':
         else:
             cg = cogs_growth_vals[i] if i < len(cogs_growth_vals) else (cogs_growth_vals[-1] if cogs_growth_vals else 3.0)
             cogs_v = cogs_v * (1 + cg / 100)
-        if asmp['labor_method'] == 'pct_revenue':
-            labor_v = rev_v * asmp.get('labor_pct', 10.0) / 100
+        if asmp['sga_method'] == 'pct_revenue':
+            sga_v = rev_v * asmp.get('sga_pct', 10.0) / 100
         else:
-            lg = labor_growth_vals[i] if i < len(labor_growth_vals) else (labor_growth_vals[-1] if labor_growth_vals else 3.0)
-            labor_v = labor_v * (1 + lg / 100)
-        if asmp['other_sga_method'] == 'pct_revenue':
-            osga_v = rev_v * asmp.get('other_sga_pct', 10.0) / 100
-        else:
-            og = other_sga_growth_vals[i] if i < len(other_sga_growth_vals) else (other_sga_growth_vals[-1] if other_sga_growth_vals else 3.0)
-            osga_v = osga_v * (1 + og / 100)
-        ebit_v = rev_v - cogs_v - labor_v - osga_v
+            sg = sga_growth_vals[i] if i < len(sga_growth_vals) else (sga_growth_vals[-1] if sga_growth_vals else 3.0)
+            sga_v = sga_v * (1 + sg / 100)
+        ebit_v = rev_v - cogs_v - sga_v
         cost_preview[yr_label] = {
             '매출액(억원)': f"{rev_v/1e8:,.1f}",
             '매출원가(억원)': f"{cogs_v/1e8:,.1f}",
             'COGS%': f"{safe_div(cogs_v,rev_v)*100:.1f}%",
-            '인건비(억원)': f"{labor_v/1e8:,.1f}",
-            '기타판관비(억원)': f"{osga_v/1e8:,.1f}",
-            '판관비합계(억원)': f"{(labor_v+osga_v)/1e8:,.1f}",
+            '판관비(억원)': f"{sga_v/1e8:,.1f}",
+            'SGA%': f"{safe_div(sga_v,rev_v)*100:.1f}%",
             '영업이익(억원)': f"{ebit_v/1e8:,.1f}",
             'EBIT%': f"{safe_div(ebit_v,rev_v)*100:.1f}%",
         }
@@ -1036,12 +932,15 @@ elif page == 'DCF 가정 입력':
     st.caption(f"선택 기준 자동계산: DSO={calc_dso:.1f}일, DIO={calc_dio:.1f}일, DPO={calc_dpo:.1f}일")
 
     # 회전율 기준이 바뀌면 향후 DSO/DIO/DPO 가정 입력값도 자동으로 갱신
+    # (위젯에 key가 지정되어 있으면 value= 인자는 무시되므로, session_state를
+    # 직접 덮어써서 갱신해야 위젯에 반영됨)
     if st.session_state.get('_prev_turnover_basis') != turnover_basis:
         asmp['nwc_dso'] = round(calc_dso, 1)
         asmp['nwc_dio'] = round(calc_dio, 1)
         asmp['nwc_dpo'] = round(calc_dpo, 1)
-        for k in ('nwc_dso_input', 'nwc_dio_input', 'nwc_dpo_input'):
-            st.session_state.pop(k, None)
+        st.session_state['nwc_dso_input'] = round(calc_dso, 1)
+        st.session_state['nwc_dio_input'] = round(calc_dio, 1)
+        st.session_state['nwc_dpo_input'] = round(calc_dpo, 1)
         st.session_state['_prev_turnover_basis'] = turnover_basis
 
     nwc_method = st.radio("NWC 예측 방법", ['Turnover 기반 (DSO/DIO/DPO)', '매출 대비 비율', '연간 고정 변동액'], horizontal=True,
@@ -1052,12 +951,16 @@ elif page == 'DCF 가정 입력':
     if asmp['nwc_method'] == 'turnover':
         st.markdown("**향후 DSO/DIO/DPO 가정 (과거 기준에서 자동 설정, 수정 가능)**")
         col1, col2, col3 = st.columns(3)
+        if 'nwc_dso_input' not in st.session_state:
+            st.session_state['nwc_dso_input'] = float(asmp.get('nwc_dso', round(calc_dso, 1)))
+            st.session_state['nwc_dio_input'] = float(asmp.get('nwc_dio', round(calc_dio, 1)))
+            st.session_state['nwc_dpo_input'] = float(asmp.get('nwc_dpo', round(calc_dpo, 1)))
         with col1:
-            asmp['nwc_dso'] = st.number_input("DSO (매출채권 회수일수)", value=float(asmp.get('nwc_dso', round(calc_dso, 1))), step=1.0, min_value=0.0, help="매출채권 / 매출액 × 365", key='nwc_dso_input')
+            asmp['nwc_dso'] = st.number_input("DSO (매출채권 회수일수)", step=1.0, min_value=0.0, help="매출채권 / 매출액 × 365", key='nwc_dso_input')
         with col2:
-            asmp['nwc_dio'] = st.number_input("DIO (재고자산 보유일수)", value=float(asmp.get('nwc_dio', round(calc_dio, 1))), step=1.0, min_value=0.0, help="재고자산 / 매출원가 × 365", key='nwc_dio_input')
+            asmp['nwc_dio'] = st.number_input("DIO (재고자산 보유일수)", step=1.0, min_value=0.0, help="재고자산 / 매출원가 × 365", key='nwc_dio_input')
         with col3:
-            asmp['nwc_dpo'] = st.number_input("DPO (매입채무 지급일수)", value=float(asmp.get('nwc_dpo', round(calc_dpo, 1))), step=1.0, min_value=0.0, help="매입채무 / 매출원가 × 365", key='nwc_dpo_input')
+            asmp['nwc_dpo'] = st.number_input("DPO (매입채무 지급일수)", step=1.0, min_value=0.0, help="매입채무 / 매출원가 × 365", key='nwc_dpo_input')
 
         # NWC/매출 환산: (DSO + DIO - DPO) / 365
         nwc_days = asmp['nwc_dso'] + asmp['nwc_dio'] - asmp['nwc_dpo']
