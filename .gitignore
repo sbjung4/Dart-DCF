@@ -1,4 +1,5 @@
 __pycache__/
 *.pyc
 .env
+.dart_api_key
 corp_codes.parquet

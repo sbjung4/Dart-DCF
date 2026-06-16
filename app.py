@@ -10,6 +10,25 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# API 키를 로컬 파일에 저장해두면 매번 입력할 필요 없이 다음 실행 시 자동으로 불러옵니다.
+_API_KEY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.dart_api_key')
+
+def _load_saved_api_key():
+    if os.path.exists(_API_KEY_FILE):
+        try:
+            with open(_API_KEY_FILE, 'r', encoding='utf-8') as f:
+                return f.read().strip()
+        except OSError:
+            return ''
+    return ''
+
+def _save_api_key(key):
+    try:
+        with open(_API_KEY_FILE, 'w', encoding='utf-8') as f:
+            f.write(key.strip())
+    except OSError:
+        pass
+
 from dart_api import (
     search_company, get_company_info, get_financial_statements,
     get_business_segments, get_corp_code_list
@@ -26,7 +45,7 @@ st.set_page_config(
 def init_session_state():
     cur_year = datetime.datetime.now().year
     defaults = {
-        'api_key': os.getenv('DART_API_KEY', ''),
+        'api_key': os.getenv('DART_API_KEY', '') or _load_saved_api_key(),
         'selected_company': None,
         'financial_data': None,
         'historical_summary': None,
@@ -177,9 +196,12 @@ with st.sidebar:
         "DART API Key",
         value=st.session_state.api_key,
         type="password",
-        help="dart.fss.or.kr에서 발급받은 API 키를 입력하세요"
+        help="dart.fss.or.kr에서 발급받은 API 키를 입력하세요. 한 번 입력하면 로컬에 저장되어 다음 실행부터는 다시 입력할 필요가 없습니다."
     )
-    if api_key_input:
+    if api_key_input and api_key_input != st.session_state.api_key:
+        st.session_state.api_key = api_key_input
+        _save_api_key(api_key_input)
+    elif api_key_input:
         st.session_state.api_key = api_key_input
 
     st.divider()
@@ -421,40 +443,35 @@ elif page == '재무제표 확인':
     st.subheader(f"📊 {st.session_state.selected_company['corp_name']} 재무 현황")
     st.caption(f"재무제표 구분: {st.session_state.fs_div} | 기준연도: {base_year}")
 
-    # 손익계산서 (연도를 열로 표시, 오름차순)
+    # 손익계산서 (연도를 열로 표시, 오름차순) — 이익률 지표를 해당 항목 바로 아래에 함께 표시
     st.markdown("#### 손익계산서 (단위: 억원)")
-    ebitda = {yr: hist['ebit'].get(yr, 0) + hist['da'].get(yr, 0) for yr in years}
-    is_rows = {
-        '매출액': hist['revenue'],
-        '매출원가': hist['cogs'],
-        '매출총이익': hist['gross_profit'],
-        '판매비': hist['selling_expense'],
-        '관리비': hist['admin_expense'],
-        '판관비': hist['sga'],
-        '영업이익(EBIT)': hist['ebit'],
-        'EBITDA': ebitda,
-        '순이익': hist['net_income'],
-    }
-    is_df = pd.DataFrame({str(yr): {k: v.get(yr, 0) for k, v in is_rows.items()} for yr in years})
-    st.dataframe(fmt_df(is_df), use_container_width=True)
-
-    # 주요 재무비율
-    st.markdown("#### 주요 재무비율")
-    ratio_rows = {}
+    is_display = {}
     for yr in years:
         rev = hist['revenue'].get(yr, 1) or 1
-        ebit = hist['ebit'].get(yr, 0)
+        cogs_v = hist['cogs'].get(yr, 0)
+        ebit_v = hist['ebit'].get(yr, 0)
+        da_v = hist['da'].get(yr, 0)
+        ebitda_v = ebit_v + da_v
         ni = hist['net_income'].get(yr, 0)
         eq = hist['total_equity'].get(yr, 1) or 1
         assets = hist['total_assets'].get(yr, 1) or 1
-        ratio_rows[str(yr)] = {
-            '매출원가율': f"{safe_div(hist['cogs'].get(yr,0),rev)*100:.1f}%",
-            '영업이익률': f"{ebit/rev*100:.1f}%",
-            '순이익률': f"{ni/rev*100:.1f}%",
-            'ROE': f"{ni/eq*100:.1f}%",
-            'ROA': f"{ni/assets*100:.1f}%",
+        is_display[str(yr)] = {
+            '매출액(억원)': f"{rev/1e8:,.1f}",
+            '매출원가(억원)': f"{cogs_v/1e8:,.1f}",
+            '매출원가율': f"{safe_div(cogs_v, rev)*100:.1f}%",
+            '매출총이익(억원)': f"{hist['gross_profit'].get(yr,0)/1e8:,.1f}",
+            '판관비(억원)': f"{hist['sga'].get(yr,0)/1e8:,.1f}",
+            '감가상각비(D&A)(억원)': f"{da_v/1e8:,.1f}",
+            '영업이익(EBIT)(억원)': f"{ebit_v/1e8:,.1f}",
+            '영업이익률': f"{safe_div(ebit_v, rev)*100:.1f}%",
+            'EBITDA(억원)': f"{ebitda_v/1e8:,.1f}",
+            'EBITDA마진율': f"{safe_div(ebitda_v, rev)*100:.1f}%",
+            '순이익(억원)': f"{ni/1e8:,.1f}",
+            '순이익률': f"{safe_div(ni, rev)*100:.1f}%",
+            'ROE': f"{safe_div(ni, eq)*100:.1f}%",
+            'ROA': f"{safe_div(ni, assets)*100:.1f}%",
         }
-    st.dataframe(pd.DataFrame(ratio_rows), use_container_width=True)
+    st.dataframe(pd.DataFrame(is_display), use_container_width=True)
 
     # 재무상태표 (연도를 열로 표시, 오름차순)
     st.markdown("#### 재무상태 (단위: 억원)")
@@ -489,7 +506,11 @@ elif page == '재무제표 확인':
             ar = hist['accounts_receivable'].get(yr, 0)
             inv = hist['inventory'].get(yr, 0)
             ap = hist['accounts_payable'].get(yr, 0)
+            rev_yr = hist['revenue'].get(yr, 0)
+            cogs_yr = hist['cogs'].get(yr, 0)
             nwc_detail[str(yr)] = {
+                '매출액(억원)': f"{rev_yr/1e8:,.1f}",
+                '매출원가(억원)': f"{cogs_yr/1e8:,.1f}",
                 '매출채권(억원)': f"{ar/1e8:,.1f}",
                 '재고자산(억원)': f"{inv/1e8:,.1f}",
                 '매입채무(억원)': f"{ap/1e8:,.1f}",
@@ -614,21 +635,17 @@ elif page == 'DCF 가정 입력':
     base_rev_val = asmp.get('revenue_total', {}).get('base', hist['revenue'].get(base_year, 0))
     rev_growths = asmp.get('revenue_total', {}).get('growth_rates', [5.0]*n)
 
-    # 과거 비용 현황 표 (판매비/관리비 포함 종합)
+    # 과거 비용 현황 표
     cost_hist = {}
     for yr in hist_years:
         rev = hist['revenue'].get(yr, 1) or 1
         cogs_v = hist['cogs'].get(yr, 0)
         sga_v = hist['sga'].get(yr, 0)
-        selling_v = hist['selling_expense'].get(yr, 0)
-        admin_v = hist['admin_expense'].get(yr, 0)
         ebit_v = hist['ebit'].get(yr, 0)
         cost_hist[str(yr)] = {
             '매출원가(억원)': f"{cogs_v/1e8:,.1f}",
             '매출원가율(%)': f"{cogs_v/rev*100:.1f}%",
-            '판매비(억원)': f"{selling_v/1e8:,.1f}" if selling_v else "-",
-            '관리비(억원)': f"{admin_v/1e8:,.1f}" if admin_v else "-",
-            '판관비합계(억원)': f"{sga_v/1e8:,.1f}",
+            '판관비(억원)': f"{sga_v/1e8:,.1f}",
             '판관비율(%)': f"{sga_v/rev*100:.1f}%",
             '영업이익(억원)': f"{ebit_v/1e8:,.1f}",
             '영업이익률(%)': f"{ebit_v/rev*100:.1f}%",
@@ -971,6 +988,8 @@ elif page == 'DCF 가정 입력':
             dio = hist['dio'].get(yr, 0)
             dpo = hist['dpo'].get(yr, 0)
             nwc_hist_data[str(yr)] = {
+                '매출액(억원)': f"{rev/1e8:,.1f}",
+                '매출원가(억원)': f"{cogs_yr/1e8:,.1f}",
                 '매출채권(억원)': f"{ar/1e8:,.1f}",
                 '재고자산(억원)': f"{inv/1e8:,.1f}",
                 '매입채무(억원)': f"{ap/1e8:,.1f}",
@@ -1016,6 +1035,15 @@ elif page == 'DCF 가정 입력':
 
     st.caption(f"선택 기준 자동계산: DSO={calc_dso:.1f}일, DIO={calc_dio:.1f}일, DPO={calc_dpo:.1f}일")
 
+    # 회전율 기준이 바뀌면 향후 DSO/DIO/DPO 가정 입력값도 자동으로 갱신
+    if st.session_state.get('_prev_turnover_basis') != turnover_basis:
+        asmp['nwc_dso'] = round(calc_dso, 1)
+        asmp['nwc_dio'] = round(calc_dio, 1)
+        asmp['nwc_dpo'] = round(calc_dpo, 1)
+        for k in ('nwc_dso_input', 'nwc_dio_input', 'nwc_dpo_input'):
+            st.session_state.pop(k, None)
+        st.session_state['_prev_turnover_basis'] = turnover_basis
+
     nwc_method = st.radio("NWC 예측 방법", ['Turnover 기반 (DSO/DIO/DPO)', '매출 대비 비율', '연간 고정 변동액'], horizontal=True,
                           index=['turnover','pct_revenue','fixed'].index(asmp.get('nwc_method','turnover')))
     nwc_method_map = {'Turnover 기반 (DSO/DIO/DPO)': 'turnover', '매출 대비 비율': 'pct_revenue', '연간 고정 변동액': 'fixed'}
@@ -1025,11 +1053,11 @@ elif page == 'DCF 가정 입력':
         st.markdown("**향후 DSO/DIO/DPO 가정 (과거 기준에서 자동 설정, 수정 가능)**")
         col1, col2, col3 = st.columns(3)
         with col1:
-            asmp['nwc_dso'] = st.number_input("DSO (매출채권 회수일수)", value=float(asmp.get('nwc_dso', round(calc_dso, 1))), step=1.0, min_value=0.0, help="매출채권 / 매출액 × 365")
+            asmp['nwc_dso'] = st.number_input("DSO (매출채권 회수일수)", value=float(asmp.get('nwc_dso', round(calc_dso, 1))), step=1.0, min_value=0.0, help="매출채권 / 매출액 × 365", key='nwc_dso_input')
         with col2:
-            asmp['nwc_dio'] = st.number_input("DIO (재고자산 보유일수)", value=float(asmp.get('nwc_dio', round(calc_dio, 1))), step=1.0, min_value=0.0, help="재고자산 / 매출원가 × 365")
+            asmp['nwc_dio'] = st.number_input("DIO (재고자산 보유일수)", value=float(asmp.get('nwc_dio', round(calc_dio, 1))), step=1.0, min_value=0.0, help="재고자산 / 매출원가 × 365", key='nwc_dio_input')
         with col3:
-            asmp['nwc_dpo'] = st.number_input("DPO (매입채무 지급일수)", value=float(asmp.get('nwc_dpo', round(calc_dpo, 1))), step=1.0, min_value=0.0, help="매입채무 / 매출원가 × 365")
+            asmp['nwc_dpo'] = st.number_input("DPO (매입채무 지급일수)", value=float(asmp.get('nwc_dpo', round(calc_dpo, 1))), step=1.0, min_value=0.0, help="매입채무 / 매출원가 × 365", key='nwc_dpo_input')
 
         # NWC/매출 환산: (DSO + DIO - DPO) / 365
         nwc_days = asmp['nwc_dso'] + asmp['nwc_dio'] - asmp['nwc_dpo']

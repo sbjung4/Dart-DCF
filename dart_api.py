@@ -325,6 +325,33 @@ def _lookup_account(account_map_by_id, category_keys, keywords=None):
     return 0.0
 
 
+def _sum_by_keyword(items, sj_div_filter, keywords, exclude_keywords=None):
+    """Sum thstrm_amount across all distinct line items whose account_nm
+    contains any of the given keywords. Used as a last-resort fallback for
+    D&A, which is frequently broken out across several note line items
+    (e.g. 유형자산 감가상각비, 무형자산상각비, 사용권자산 감가상각비) with no
+    standard XBRL account_id."""
+    seen = set()
+    total = 0.0
+    for item in items:
+        if sj_div_filter and item.get('sj_div') != sj_div_filter:
+            continue
+        name = item.get('account_nm', '')
+        if not name:
+            continue
+        norm = _normalize_account_nm(name)
+        if exclude_keywords and any(kw in norm for kw in exclude_keywords):
+            continue
+        if not any(kw in norm for kw in keywords):
+            continue
+        dedup_key = (item.get('account_id', ''), name, item.get('thstrm_amount', ''))
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+        total += _safe_amount(item.get('thstrm_amount', '0'))
+    return total
+
+
 def _parse_statement(items, sj_div_filter=None):
     """Parse a list of financial statement items into a dict keyed by account_id"""
     result = {}
@@ -383,13 +410,19 @@ def _extract_financials_from_items(items):
     da_rou = _lookup_account(cf_map, ACCOUNT_MAP['da_rou'], KOREAN_NAME_KEYWORDS['da_rou'])
     da_components = da_ppe + da_intangible + da_rou
 
-    # Best estimate: components sum > combined CF > IS
+    # Best estimate: components sum > combined CF > IS > sum of all
+    # "상각비" line items found anywhere in CF/IS (catches notes that break
+    # D&A into several non-standard line items with no XBRL account_id)
     if da_components > 0:
         da = da_components
     elif da_cf > 0:
         da = da_cf
-    else:
+    elif da_is > 0:
         da = da_is
+    else:
+        da = _sum_by_keyword(cf_items, None, ['상각비'])
+        if da == 0:
+            da = _sum_by_keyword(is_items, None, ['상각비'])
 
     # Extract BS metrics
     total_assets = _lookup_account(bs_map, ACCOUNT_MAP['total_assets'])
