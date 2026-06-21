@@ -1,14 +1,21 @@
 """
 DCF 모델 엑셀 내보내기.
 
-Streamlit 앱(app.py)에서 입력한 가정값들을 시트별로(매출/COGS·SG&A/D&A·CapEx/
-NWC/WACC·Tax) 분리하고, 그 시트들을 셀 수식으로 참조하는 FCFF/DCF 시트를
-별도로 구성한다. 엑셀을 열어서 가정값을 바꾸면 DCF 결과가 자동으로
-재계산되도록, 값이 아니라 수식을 셀에 직접 쓴다.
+사용자가 제공한 참고 양식(Control / DCF / WACC / FS / Revenue / COGS / SG&A /
+D&A CAPEX / NWC / Debt / Tax 시트 구성)을 그대로 따라가되, CB(전환사채) 전환
+케이스 분기와 회사 전용 raw 데이터 시트는 범용 양식이 아니므로 제외한다.
 
-주의: 현재 계산 엔진(dcf.py)은 매출 -> COGS/SG&A -> EBIT -> FCFF 와 NWC 변동만
-모델링하며, 추정 재무상태표/현금흐름표 풀 롤포워드는 계산하지 않는다. 따라서
-이 모듈도 동일한 범위(가정 시트 + FCFF + DCF + 과거 재무제표)까지만 만든다.
+핵심 구조: 모든 가정 입력값은 "Control" 시트 한 곳에 모여 있고, 나머지 모든
+시트(Revenue/COGS/SG&A/D&A CAPEX/NWC/Debt/WACC/Tax/FS/DCF)는 Control 시트의
+셀을 수식으로 참조한다. 즉 Control 시트의 숫자만 바꾸면 뒤의 모든 시트와
+DCF 결과가 자동으로 재계산된다.
+
+과거 재무제표는 DART에서 받아온 그대로 BS/IS/CS 세 시트로 나눠 전부 싣는다
+(참고 양식의 회사 전용 "해농_BS/IS/CS" 시트를 범용화한 것).
+
+주의: 현재 계산 엔진(dcf.py)의 FCFF/DCF 자체는 무차입 기준(unlevered)이라
+차입금/이자/배당 가정이 FCFF 값을 바꾸지는 않는다. 이 가정들은 추정
+재무상태표(BS)·현금흐름표(CS)를 구성하기 위해서만 쓰인다.
 """
 
 import io
@@ -48,331 +55,522 @@ def _label(ws, row, col, text, bold=False):
     cell = ws.cell(row=row, column=col, value=text)
     if bold:
         cell.font = BOLD
+    return cell
+
+
+def _input_row(ws, row, col0, n, values, fmt=NUM_FMT):
+    for i in range(n):
+        v = values[i] if i < len(values) else (values[-1] if values else 0)
+        cell = ws.cell(row=row, column=col0 + i, value=v)
+        cell.number_format = fmt
+        cell.fill = INPUT_FILL
+
+
+def _col_widths(ws, ncols, width=14, start=2):
+    for c in range(start, start + ncols):
+        ws.column_dimensions[get_column_letter(c)].width = width
 
 
 def build_excel_workbook(company_name, hist, asmp, fcff_df, pv_fcff_df,
                           wacc, tgr, pv_tv, ev, net_debt, eq_val, shares,
                           price_per_share, base_year):
-    """
-    hist: extract_historical_summary() 결과 dict (metric -> {year: value})
-    asmp: st.session_state.dcf_assumptions (UI 단위: %, 억원 등 원시 입력값)
-    fcff_df, pv_fcff_df: dcf.py DCFModel.calculate_ev() 결과
-    나머지: app.py Page 4에서 계산된 스칼라 값들
-    """
     wb = Workbook()
     wb.remove(wb.active)
 
     n = int(asmp.get('projection_years', 5))
     proj_years = [base_year + i + 1 for i in range(n)]
     hist_years = sorted(hist['revenue'].keys())
-    all_years_hdr = hist_years + proj_years
 
-    # ────────────────────────────────────────────────────────────────
-    # 1. 과거 재무제표
-    # ────────────────────────────────────────────────────────────────
-    ws = wb.create_sheet("재무제표(과거)")
-    _title(ws, f"{company_name} — 과거 재무제표 (단위: 백만원)", span=2 + len(hist_years))
-    _label(ws, 4, 2, "항목", bold=True)
-    _year_header(ws, 4, 3, hist_years)
+    # ════════════════════════════════════════════════════════════════
+    # 0. Control — 모든 가정 입력값이 모이는 시트
+    # ════════════════════════════════════════════════════════════════
+    ctrl = wb.create_sheet("Control")
+    _title(ctrl, f"{company_name} — Control Panel (가정 입력)", span=2 + n)
+    cr = {}  # control row registry
 
-    rows = [
-        ("매출액", "revenue"), ("매출원가", "cogs"), ("매출총이익", "gross_profit"),
-        ("판매비와관리비", "sga"), ("영업이익(EBIT)", "ebit"), ("순이익", "net_income"),
-        ("D&A", "da"), ("CapEx", "capex"),
-        ("총자산", "total_assets"), ("총차입금", "total_debt"), ("총자본", "total_equity"),
-        ("현금", "cash"), ("순운전자본(NWC)", "nwc"),
-        ("매출채권", "accounts_receivable"), ("재고자산", "inventory"), ("매입채무", "accounts_payable"),
-        ("발행주식수", "shares_outstanding"),
-    ]
-    r = 5
-    for label, key in rows:
-        _label(ws, r, 2, label)
-        for i, yr in enumerate(hist_years):
-            v = hist.get(key, {}).get(yr, 0) or 0
-            unit = 1 if key == "shares_outstanding" else 1e6
-            cell = ws.cell(row=r, column=3 + i, value=v / unit)
-            cell.number_format = NUM_FMT
-        r += 1
-    for c in range(2, 3 + len(hist_years)):
-        ws.column_dimensions[get_column_letter(c)].width = 16
-    hist_sheet_first_row = 5
-    hist_row_of = {key: hist_sheet_first_row + idx for idx, (_, key) in enumerate(rows)}
-
-    # ────────────────────────────────────────────────────────────────
-    # 2. Revenue 가정
-    # ────────────────────────────────────────────────────────────────
-    ws_rev = wb.create_sheet("Revenue")
-    _title(ws_rev, "매출액 가정 (단위: 백만원)", span=2 + n)
-    _label(ws_rev, 4, 2, "항목", bold=True)
-    _year_header(ws_rev, 4, 3, proj_years)
-
-    rev_method = asmp.get('revenue_method', 'total')
-    base_rev_억 = asmp.get('revenue_total', {}).get('base', hist['revenue'].get(base_year, 0))
-
-    _label(ws_rev, 6, 2, "기준연도 매출액")
-    ws_rev.cell(row=6, column=3, value=f"='재무제표(과거)'!{get_column_letter(3 + len(hist_years) - 1)}{hist_row_of['revenue']}")
-    ws_rev.cell(row=6, column=3).number_format = NUM_FMT
-
-    _label(ws_rev, 8, 2, "YoY 성장률(%)", bold=True)
+    r = 4
+    _label(ctrl, r, 2, "1. 매출 YoY 성장률(%)", bold=True)
+    _year_header(ctrl, r + 1, 3, proj_years)
     growth_rates = asmp.get('revenue_total', {}).get('growth_rates', [5.0] * n)
-    for i in range(n):
-        cell = ws_rev.cell(row=8, column=3 + i, value=(growth_rates[i] if i < len(growth_rates) else 3.0) / 100.0)
-        cell.number_format = PCT_FMT
-        cell.fill = INPUT_FILL
+    _input_row(ctrl, r + 2, 3, n, [g / 100.0 for g in growth_rates], PCT_FMT)
+    cr['rev_growth'] = r + 2
+    r += 4
 
-    _label(ws_rev, 10, 2, "매출액(추정)", bold=True)
-    for i in range(n):
-        col = get_column_letter(3 + i)
-        prev = f"$C$6" if i == 0 else f"{get_column_letter(3 + i - 1)}10"
-        cell = ws_rev.cell(row=10, column=3 + i, value=f"={prev}*(1+{col}8)")
-        cell.number_format = NUM_FMT
-        cell.font = BOLD
-    for c in range(2, 3 + n):
-        ws_rev.column_dimensions[get_column_letter(c)].width = 14
+    cogs_method = asmp.get('cogs_method', 'pct_revenue')
+    sga_method = asmp.get('sga_method', 'pct_revenue')
+    _label(ctrl, r, 2, f"2. 매출원가 가정 ({'매출대비%' if cogs_method=='pct_revenue' else 'YoY성장률%'})", bold=True)
+    if cogs_method == 'pct_revenue':
+        _input_row(ctrl, r + 1, 3, n, [asmp.get('cogs_pct', 0) / 100.0] * n, PCT_FMT)
+    else:
+        _input_row(ctrl, r + 1, 3, n, [g / 100.0 for g in asmp.get('cogs_growth', [3.0] * n)], PCT_FMT)
+    cr['cogs'] = r + 1
+    r += 3
 
-    # ────────────────────────────────────────────────────────────────
-    # 3. COGS / SG&A 가정
-    # ────────────────────────────────────────────────────────────────
-    ws_cs = wb.create_sheet("COGS_SGA")
-    _title(ws_cs, "매출원가 · 판관비 가정 (단위: 백만원)", span=2 + n)
-    _year_header(ws_cs, 4, 3, proj_years)
-
-    def cost_block(ws, row0, label, method_key, pct_key, growth_key, hist_key):
-        method = asmp.get(method_key, 'pct_revenue')
-        is_pct = method == 'pct_revenue'
-        _label(ws, row0, 2, f"{label} 방법: {'매출 대비 비율' if is_pct else '전년 대비 성장률'}", bold=True)
-        if is_pct:
-            pct = asmp.get(pct_key, 0)
-            for i in range(n):
-                cell = ws.cell(row=row0 + 1, column=3 + i, value=pct / 100.0)
-                cell.number_format = PCT_FMT
-                cell.fill = INPUT_FILL
-            _label(ws, row0 + 1, 2, f"{label}/매출(%)")
-            for i in range(n):
-                col = get_column_letter(3 + i)
-                cell = ws.cell(row=row0 + 2, column=3 + i, value=f"=Revenue!{col}10*{col}{row0+1}")
-                cell.number_format = NUM_FMT
-        else:
-            rates = asmp.get(growth_key, [3.0] * n)
-            for i in range(n):
-                cell = ws.cell(row=row0 + 1, column=3 + i, value=(rates[i] if i < len(rates) else 3.0) / 100.0)
-                cell.number_format = PCT_FMT
-                cell.fill = INPUT_FILL
-            _label(ws, row0 + 1, 2, "YoY 성장률(%)")
-            base_col = get_column_letter(3 + len(hist_years) - 1)
-            for i in range(n):
-                col = get_column_letter(3 + i)
-                prev = f"'재무제표(과거)'!{base_col}{hist_row_of[hist_key]}" if i == 0 else f"{get_column_letter(3 + i - 1)}{row0+2}"
-                cell = ws.cell(row=row0 + 2, column=3 + i, value=f"={prev}*(1+{col}{row0+1})")
-                cell.number_format = NUM_FMT
-        _label(ws, row0 + 2, 2, f"{label}(추정)", bold=True)
-        return row0 + 2  # row containing projected values
-
-    cogs_row = cost_block(ws_cs, 6, "매출원가", 'cogs_method', 'cogs_pct', 'cogs_growth', 'cogs')
-    sga_row = cost_block(ws_cs, 11, "판관비", 'sga_method', 'sga_pct', 'sga_growth', 'sga')
-    for c in range(2, 3 + n):
-        ws_cs.column_dimensions[get_column_letter(c)].width = 14
-
-    # ────────────────────────────────────────────────────────────────
-    # 4. D&A / CapEx 가정
-    # ────────────────────────────────────────────────────────────────
-    ws_dc = wb.create_sheet("DA_CAPEX")
-    _title(ws_dc, "D&A · CapEx 가정 (단위: 백만원)", span=2 + n)
-    _year_header(ws_dc, 4, 3, proj_years)
+    _label(ctrl, r, 2, f"3. 판관비 가정 ({'매출대비%' if sga_method=='pct_revenue' else 'YoY성장률%'})", bold=True)
+    if sga_method == 'pct_revenue':
+        _input_row(ctrl, r + 1, 3, n, [asmp.get('sga_pct', 0) / 100.0] * n, PCT_FMT)
+    else:
+        _input_row(ctrl, r + 1, 3, n, [g / 100.0 for g in asmp.get('sga_growth', [3.0] * n)], PCT_FMT)
+    cr['sga'] = r + 1
+    r += 3
 
     da_method = asmp.get('da_method', 'pct_revenue')
-    _label(ws_dc, 6, 2, f"D&A 방법: {da_method}", bold=True)
+    da_fmt = PCT_FMT if da_method == 'pct_revenue' else NUM_FMT
+    _label(ctrl, r, 2, f"4. D&A 가정 ({da_method})", bold=True)
     if da_method == 'pct_revenue':
-        pct = asmp.get('da_pct', 3.0)
-        for i in range(n):
-            cell = ws_dc.cell(row=7, column=3 + i, value=pct / 100.0)
-            cell.number_format = PCT_FMT
-            cell.fill = INPUT_FILL
-        _label(ws_dc, 7, 2, "D&A/매출(%)")
-        for i in range(n):
-            col = get_column_letter(3 + i)
-            ws_dc.cell(row=8, column=3 + i, value=f"=Revenue!{col}10*{col}7").number_format = NUM_FMT
+        _input_row(ctrl, r + 1, 3, n, [asmp.get('da_pct', 0) / 100.0] * n, PCT_FMT)
     elif da_method == 'fixed':
-        fixed = asmp.get('da_fixed', hist['da'].get(base_year, 0)) / 1e6
-        for i in range(n):
-            cell = ws_dc.cell(row=7, column=3 + i, value=fixed)
-            cell.number_format = NUM_FMT
-            cell.fill = INPUT_FILL
-        _label(ws_dc, 7, 2, "고정 D&A")
-        for i in range(n):
-            col = get_column_letter(3 + i)
-            ws_dc.cell(row=8, column=3 + i, value=f"={col}7").number_format = NUM_FMT
-    else:  # growth
-        rates = asmp.get('da_growth', [3.0] * n)
-        for i in range(n):
-            cell = ws_dc.cell(row=7, column=3 + i, value=(rates[i] if i < len(rates) else 3.0) / 100.0)
-            cell.number_format = PCT_FMT
-            cell.fill = INPUT_FILL
-        _label(ws_dc, 7, 2, "YoY 성장률(%)")
-        base_col = get_column_letter(3 + len(hist_years) - 1)
-        for i in range(n):
-            col = get_column_letter(3 + i)
-            prev = f"'재무제표(과거)'!{base_col}{hist_row_of['da']}" if i == 0 else f"{get_column_letter(3 + i - 1)}8"
-            ws_dc.cell(row=8, column=3 + i, value=f"={prev}*(1+{col}7)").number_format = NUM_FMT
-    _label(ws_dc, 8, 2, "D&A(추정)", bold=True)
+        _input_row(ctrl, r + 1, 3, n, [asmp.get('da_fixed', hist['da'].get(base_year, 0)) / 1e6] * n, NUM_FMT)
+    else:
+        _input_row(ctrl, r + 1, 3, n, [g / 100.0 for g in asmp.get('da_growth', [3.0] * n)], PCT_FMT)
+    cr['da'] = r + 1
+    r += 3
 
     capex_method = asmp.get('capex_method', 'equal_da')
-    _label(ws_dc, 11, 2, f"유지보수 CapEx 방법: {capex_method}", bold=True)
-    if capex_method == 'equal_da':
-        for i in range(n):
-            col = get_column_letter(3 + i)
-            ws_dc.cell(row=12, column=3 + i, value=f"={col}8").number_format = NUM_FMT
-    elif capex_method == 'pct_revenue':
-        pct = asmp.get('capex_pct', 3.0)
-        for i in range(n):
-            cell = ws_dc.cell(row=11, column=3 + i, value=pct / 100.0)
-            cell.number_format = PCT_FMT
-            cell.fill = INPUT_FILL
-            col = get_column_letter(3 + i)
-            ws_dc.cell(row=12, column=3 + i, value=f"=Revenue!{col}10*{col}11").number_format = NUM_FMT
-    else:  # fixed
-        fixed = asmp.get('capex_fixed', hist['capex'].get(base_year, 0)) / 1e6
-        for i in range(n):
-            cell = ws_dc.cell(row=11, column=3 + i, value=fixed)
-            cell.number_format = NUM_FMT
-            cell.fill = INPUT_FILL
-            col = get_column_letter(3 + i)
-            ws_dc.cell(row=12, column=3 + i, value=f"={col}11").number_format = NUM_FMT
-    _label(ws_dc, 12, 2, "유지보수 CapEx", bold=True)
-
+    _label(ctrl, r, 2, f"5. CapEx 가정 ({capex_method})", bold=True)
+    if capex_method == 'pct_revenue':
+        _input_row(ctrl, r + 1, 3, n, [asmp.get('capex_pct', 0) / 100.0] * n, PCT_FMT)
+    elif capex_method == 'fixed':
+        _input_row(ctrl, r + 1, 3, n, [asmp.get('capex_fixed', hist['capex'].get(base_year, 0)) / 1e6] * n, NUM_FMT)
+    else:
+        _input_row(ctrl, r + 1, 3, n, [0.0] * n, NUM_FMT)  # equal_da: D&A row referenced directly downstream
+    cr['capex'] = r + 1
+    r += 2
+    _label(ctrl, r, 2, "신규투자 CapEx (백만원)")
     new_invest_list = asmp.get('new_invest_capex_list', [0.0] * n)
-    _label(ws_dc, 14, 2, "신규투자 CapEx(억원 입력값)")
-    for i in range(n):
-        cell = ws_dc.cell(row=14, column=3 + i, value=(new_invest_list[i] if i < len(new_invest_list) else 0.0) * 100)
-        cell.number_format = NUM_FMT
-        cell.fill = INPUT_FILL
-
-    _label(ws_dc, 15, 2, "총 CapEx(추정)", bold=True)
-    for i in range(n):
-        col = get_column_letter(3 + i)
-        ws_dc.cell(row=15, column=3 + i, value=f"={col}12+{col}14").number_format = NUM_FMT
-    for c in range(2, 3 + n):
-        ws_dc.column_dimensions[get_column_letter(c)].width = 16
-    da_row, capex_row = 8, 15
-
-    # ────────────────────────────────────────────────────────────────
-    # 5. NWC 가정
-    # ────────────────────────────────────────────────────────────────
-    ws_nwc = wb.create_sheet("NWC")
-    _title(ws_nwc, "순운전자본(NWC) 가정 (단위: 백만원)", span=2 + n)
-    _year_header(ws_nwc, 4, 3, proj_years)
+    _input_row(ctrl, r, 3, n, [v * 100 for v in new_invest_list], NUM_FMT)
+    cr['new_invest'] = r
+    r += 2
 
     nwc_method = asmp.get('nwc_method', 'pct_revenue')
     if nwc_method == 'turnover':
         nwc_method = 'pct_revenue'
+    _label(ctrl, r, 2, f"6. NWC 가정 ({nwc_method})", bold=True)
     if nwc_method == 'pct_revenue':
-        pct = asmp.get('nwc_pct', 0)
-        base_col = get_column_letter(3 + len(hist_years) - 1)
-        _label(ws_nwc, 6, 2, "NWC/매출(%)", bold=True)
-        for i in range(n):
-            cell = ws_nwc.cell(row=6, column=3 + i, value=pct / 100.0)
-            cell.number_format = PCT_FMT
-            cell.fill = INPUT_FILL
+        _input_row(ctrl, r + 1, 3, n, [asmp.get('nwc_pct', 0) / 100.0] * n, PCT_FMT)
+    else:
+        _input_row(ctrl, r + 1, 3, n, [asmp.get('nwc_fixed', 0) / 1e6] * n, NUM_FMT)
+    cr['nwc'] = r + 1
+    r += 3
+
+    _label(ctrl, r, 2, "7. 차입금 기말잔액 (백만원)", bold=True)
+    debt_list = asmp.get('debt_balance_list', [hist['total_debt'].get(base_year, 0) / 1e8] * n)
+    _input_row(ctrl, r + 1, 3, n, [v * 100 for v in debt_list], NUM_FMT)
+    cr['debt_balance'] = r + 1
+    r += 3
+
+    _label(ctrl, r, 2, "8. 적용 이자율(%)", bold=True)
+    interest_rate = asmp.get('interest_rate', 4.0)
+    _input_row(ctrl, r + 1, 3, n, [interest_rate / 100.0] * n, PCT_FMT)
+    cr['interest_rate'] = r + 1
+    r += 3
+
+    div_method = asmp.get('dividend_method', 'payout_ratio')
+    _label(ctrl, r, 2, f"9. 배당 가정 ({'배당성향%' if div_method=='payout_ratio' else '주당배당금'})", bold=True)
+    if div_method == 'payout_ratio':
+        _input_row(ctrl, r + 1, 3, n, [asmp.get('dividend_payout_pct', 0) / 100.0] * n, PCT_FMT)
+    else:
+        _input_row(ctrl, r + 1, 3, n, [asmp.get('dividend_per_share', 0)] * n, '#,##0')
+    cr['dividend'] = r + 1
+    r += 3
+
+    _label(ctrl, r, 2, "10. 법인세율(%)")
+    ctrl.cell(row=r, column=3, value=asmp.get('tax_rate', 22.0) / 100.0).number_format = PCT_FMT
+    ctrl.cell(row=r, column=3).fill = INPUT_FILL
+    cr['tax_rate'] = (r, 3)
+    r += 1
+
+    _label(ctrl, r, 2, "무위험수익률 Rf(%)")
+    ctrl.cell(row=r, column=3, value=asmp.get('risk_free_rate', 3.5) / 100.0).number_format = PCT_FMT
+    ctrl.cell(row=r, column=3).fill = INPUT_FILL
+    cr['rf'] = (r, 3); r += 1
+
+    _label(ctrl, r, 2, "베타(β)")
+    ctrl.cell(row=r, column=3, value=asmp.get('beta', 1.0)).number_format = '0.00'
+    ctrl.cell(row=r, column=3).fill = INPUT_FILL
+    cr['beta'] = (r, 3); r += 1
+
+    _label(ctrl, r, 2, "시장위험프리미엄 ERP(%)")
+    ctrl.cell(row=r, column=3, value=asmp.get('equity_risk_premium', 5.5) / 100.0).number_format = PCT_FMT
+    ctrl.cell(row=r, column=3).fill = INPUT_FILL
+    cr['erp'] = (r, 3); r += 1
+
+    _label(ctrl, r, 2, "타인자본비용 세전 Kd(%)")
+    ctrl.cell(row=r, column=3, value=asmp.get('cost_of_debt', 5.0) / 100.0).number_format = PCT_FMT
+    ctrl.cell(row=r, column=3).fill = INPUT_FILL
+    cr['kd'] = (r, 3); r += 1
+
+    _label(ctrl, r, 2, "자기자본비용 직접입력(%, 0=CAPM 사용)")
+    ctrl.cell(row=r, column=3, value=(asmp.get('cost_of_equity') or 0) / 100.0).number_format = PCT_FMT
+    ctrl.cell(row=r, column=3).fill = INPUT_FILL
+    cr['ke_direct'] = (r, 3); r += 1
+
+    _label(ctrl, r, 2, "타인자본비중 직접입력(%, 0=BS기준 자동계산)")
+    ctrl.cell(row=r, column=3, value=(asmp.get('debt_weight') or 0) / 100.0).number_format = PCT_FMT
+    ctrl.cell(row=r, column=3).fill = INPUT_FILL
+    cr['dw_direct'] = (r, 3); r += 1
+
+    _label(ctrl, r, 2, "영구성장률 TGR(%)")
+    ctrl.cell(row=r, column=3, value=tgr / 100.0).number_format = PCT_FMT
+    ctrl.cell(row=r, column=3).fill = INPUT_FILL
+    cr['tgr'] = (r, 3); r += 1
+
+    _label(ctrl, r, 2, "발행주식수")
+    ctrl.cell(row=r, column=3, value=shares if shares else 0).number_format = '#,##0'
+    ctrl.cell(row=r, column=3).fill = INPUT_FILL
+    cr['shares'] = (r, 3); r += 1
+
+    ctrl.column_dimensions['B'].width = 34
+    _col_widths(ctrl, n, 14)
+
+    def C(row, i=None):
+        """Control 시트 참조 문자열. i가 있으면 연도별 열, 없으면 C열 단일 셀."""
+        if i is None:
+            return f"Control!$C${row}"
+        return f"Control!{get_column_letter(3+i)}${row}"
+
+    # ════════════════════════════════════════════════════════════════
+    # 1. 과거 재무제표 — BS / IS / CS 세 시트
+    # ════════════════════════════════════════════════════════════════
+    def hist_sheet(name, rows):
+        ws = wb.create_sheet(name)
+        _title(ws, f"{company_name} — 과거 {name} (단위: 백만원)", span=2 + len(hist_years))
+        _label(ws, 4, 2, "항목", bold=True)
+        _year_header(ws, 4, 3, hist_years)
+        row_of = {}
+        rr = 5
+        for label, key in rows:
+            _label(ws, rr, 2, label)
+            for i, yr in enumerate(hist_years):
+                v = hist.get(key, {}).get(yr, 0) or 0
+                unit = 1 if key == "shares_outstanding" else 1e6
+                cell = ws.cell(row=rr, column=3 + i, value=v / unit)
+                cell.number_format = NUM_FMT
+            row_of[key] = rr
+            rr += 1
+        _col_widths(ws, len(hist_years) + 1, 16)
+        return row_of
+
+    bs_row = hist_sheet("BS", [
+        ("총자산", "total_assets"), ("유동자산", "current_assets"), ("유동부채", "current_liabilities"),
+        ("현금", "cash"), ("총차입금", "total_debt"), ("총자본", "total_equity"),
+        ("매출채권", "accounts_receivable"), ("재고자산", "inventory"), ("매입채무", "accounts_payable"),
+        ("발행주식수", "shares_outstanding"),
+    ])
+    is_row = hist_sheet("IS", [
+        ("매출액", "revenue"), ("매출원가", "cogs"), ("매출총이익", "gross_profit"),
+        ("판매비와관리비", "sga"), ("영업이익(EBIT)", "ebit"), ("이자비용", "interest_expense"),
+        ("순이익", "net_income"),
+    ])
+    cs_row = hist_sheet("CS", [
+        ("영업활동현금흐름", "operating_cf"), ("투자활동현금흐름", "investing_cf"),
+        ("D&A", "da"), ("CapEx", "capex"), ("배당금지급", "dividends_paid"),
+    ])
+
+    # ════════════════════════════════════════════════════════════════
+    # 2. Revenue
+    # ════════════════════════════════════════════════════════════════
+    ws_rev = wb.create_sheet("Revenue")
+    _title(ws_rev, "매출액 (단위: 백만원)", span=2 + n)
+    _label(ws_rev, 4, 2, "항목", bold=True)
+    _year_header(ws_rev, 4, 3, proj_years)
+
+    base_rev_col = get_column_letter(3 + len(hist_years) - 1)
+    _label(ws_rev, 6, 2, "기준연도 매출액")
+    ws_rev.cell(row=6, column=3, value=f"=IS!{base_rev_col}{is_row['revenue']}").number_format = NUM_FMT
+
+    _label(ws_rev, 8, 2, "YoY 성장률(%)")
+    for i in range(n):
+        ws_rev.cell(row=8, column=3 + i, value=f"={C(cr['rev_growth'], i)}").number_format = PCT_FMT
+
+    _label(ws_rev, 10, 2, "매출액(추정)", bold=True)
+    for i in range(n):
+        col = get_column_letter(3 + i)
+        prev = "$C$6" if i == 0 else f"{get_column_letter(3+i-1)}10"
+        ws_rev.cell(row=10, column=3 + i, value=f"={prev}*(1+{col}8)").number_format = NUM_FMT
+        ws_rev.cell(row=10, column=3 + i).font = BOLD
+    _col_widths(ws_rev, n + 1)
+    rev_row = 10
+
+    # ════════════════════════════════════════════════════════════════
+    # 3. COGS
+    # ════════════════════════════════════════════════════════════════
+    ws_cogs = wb.create_sheet("COGS")
+    _title(ws_cogs, "매출원가 (단위: 백만원)", span=2 + n)
+    _year_header(ws_cogs, 4, 3, proj_years)
+    _label(ws_cogs, 6, 2, "매출원가/매출(%)" if cogs_method == 'pct_revenue' else "YoY 성장률(%)")
+    for i in range(n):
+        ws_cogs.cell(row=6, column=3 + i, value=f"={C(cr['cogs'], i)}").number_format = PCT_FMT
+    _label(ws_cogs, 8, 2, "매출원가(추정)", bold=True)
+    base_col = get_column_letter(3 + len(hist_years) - 1)
+    for i in range(n):
+        col = get_column_letter(3 + i)
+        if cogs_method == 'pct_revenue':
+            ws_cogs.cell(row=8, column=3 + i, value=f"=Revenue!{col}{rev_row}*{col}6").number_format = NUM_FMT
+        else:
+            prev = f"IS!{base_col}{is_row['cogs']}" if i == 0 else f"{get_column_letter(3+i-1)}8"
+            ws_cogs.cell(row=8, column=3 + i, value=f"={prev}*(1+{col}6)").number_format = NUM_FMT
+    _col_widths(ws_cogs, n + 1)
+    cogs_row_out = 8
+
+    # ════════════════════════════════════════════════════════════════
+    # 4. SG&A
+    # ════════════════════════════════════════════════════════════════
+    ws_sga = wb.create_sheet("SG&A")
+    _title(ws_sga, "판매비와관리비 (단위: 백만원)", span=2 + n)
+    _year_header(ws_sga, 4, 3, proj_years)
+    _label(ws_sga, 6, 2, "판관비/매출(%)" if sga_method == 'pct_revenue' else "YoY 성장률(%)")
+    for i in range(n):
+        ws_sga.cell(row=6, column=3 + i, value=f"={C(cr['sga'], i)}").number_format = PCT_FMT
+    _label(ws_sga, 8, 2, "판관비(추정)", bold=True)
+    for i in range(n):
+        col = get_column_letter(3 + i)
+        if sga_method == 'pct_revenue':
+            ws_sga.cell(row=8, column=3 + i, value=f"=Revenue!{col}{rev_row}*{col}6").number_format = NUM_FMT
+        else:
+            prev = f"IS!{base_col}{is_row['sga']}" if i == 0 else f"{get_column_letter(3+i-1)}8"
+            ws_sga.cell(row=8, column=3 + i, value=f"={prev}*(1+{col}6)").number_format = NUM_FMT
+    _col_widths(ws_sga, n + 1)
+    sga_row_out = 8
+
+    # ════════════════════════════════════════════════════════════════
+    # 5. D&A CAPEX
+    # ════════════════════════════════════════════════════════════════
+    ws_dc = wb.create_sheet("D&A CAPEX")
+    _title(ws_dc, "D&A · CapEx (단위: 백만원)", span=2 + n)
+    _year_header(ws_dc, 4, 3, proj_years)
+
+    _label(ws_dc, 6, 2, f"D&A 가정값 ({da_method})")
+    for i in range(n):
+        ws_dc.cell(row=6, column=3 + i, value=f"={C(cr['da'], i)}").number_format = da_fmt
+    _label(ws_dc, 8, 2, "D&A(추정)", bold=True)
+    for i in range(n):
+        col = get_column_letter(3 + i)
+        if da_method == 'pct_revenue':
+            ws_dc.cell(row=8, column=3 + i, value=f"=Revenue!{col}{rev_row}*{col}6").number_format = NUM_FMT
+        elif da_method == 'fixed':
+            ws_dc.cell(row=8, column=3 + i, value=f"={col}6").number_format = NUM_FMT
+        else:
+            prev = f"CS!{base_col}{cs_row['da']}" if i == 0 else f"{get_column_letter(3+i-1)}8"
+            ws_dc.cell(row=8, column=3 + i, value=f"={prev}*(1+{col}6)").number_format = NUM_FMT
+    da_row_out = 8
+
+    _label(ws_dc, 11, 2, f"유지보수 CapEx 가정값 ({capex_method})")
+    for i in range(n):
+        ws_dc.cell(row=11, column=3 + i, value=f"={C(cr['capex'], i)}").number_format = (
+            PCT_FMT if capex_method == 'pct_revenue' else NUM_FMT)
+    _label(ws_dc, 12, 2, "유지보수 CapEx", bold=True)
+    for i in range(n):
+        col = get_column_letter(3 + i)
+        if capex_method == 'equal_da':
+            ws_dc.cell(row=12, column=3 + i, value=f"={col}8").number_format = NUM_FMT
+        elif capex_method == 'pct_revenue':
+            ws_dc.cell(row=12, column=3 + i, value=f"=Revenue!{col}{rev_row}*{col}11").number_format = NUM_FMT
+        else:
+            ws_dc.cell(row=12, column=3 + i, value=f"={col}11").number_format = NUM_FMT
+
+    _label(ws_dc, 14, 2, "신규투자 CapEx")
+    for i in range(n):
+        ws_dc.cell(row=14, column=3 + i, value=f"={C(cr['new_invest'], i)}").number_format = NUM_FMT
+    _label(ws_dc, 15, 2, "총 CapEx(추정)", bold=True)
+    for i in range(n):
+        col = get_column_letter(3 + i)
+        ws_dc.cell(row=15, column=3 + i, value=f"={col}12+{col}14").number_format = NUM_FMT
+    _col_widths(ws_dc, n + 1)
+    capex_row_out = 15
+
+    # ════════════════════════════════════════════════════════════════
+    # 6. NWC
+    # ════════════════════════════════════════════════════════════════
+    ws_nwc = wb.create_sheet("NWC")
+    _title(ws_nwc, "순운전자본(NWC) (단위: 백만원)", span=2 + n)
+    _year_header(ws_nwc, 4, 3, proj_years)
+    _label(ws_nwc, 6, 2, "NWC 가정값" + (" (매출대비%)" if nwc_method == 'pct_revenue' else " (고정액)"))
+    for i in range(n):
+        ws_nwc.cell(row=6, column=3 + i, value=f"={C(cr['nwc'], i)}").number_format = (
+            PCT_FMT if nwc_method == 'pct_revenue' else NUM_FMT)
+
+    base_nwc_val = (hist['nwc'].get(base_year, 0)) / 1e6
+    if nwc_method == 'pct_revenue':
         _label(ws_nwc, 7, 2, "NWC 잔액(추정)")
         for i in range(n):
             col = get_column_letter(3 + i)
-            ws_nwc.cell(row=7, column=3 + i, value=f"=Revenue!{col}10*{col}6").number_format = NUM_FMT
+            ws_nwc.cell(row=7, column=3 + i, value=f"=Revenue!{col}{rev_row}*{col}6").number_format = NUM_FMT
         _label(ws_nwc, 8, 2, "ΔNWC(현금유출, +)", bold=True)
         for i in range(n):
             col = get_column_letter(3 + i)
-            prev = f"'재무제표(과거)'!{base_col}{hist_row_of['nwc']}" if i == 0 else f"{get_column_letter(3 + i - 1)}7"
-            ws_nwc.cell(row=8, column=3 + i, value=f"={col}7-{prev}").number_format = NUM_FMT
-    else:  # fixed
-        fixed = asmp.get('nwc_fixed', 0) / 1e6
-        _label(ws_nwc, 6, 2, "연간 ΔNWC 고정값(현금유출, +)", bold=True)
-        for i in range(n):
-            cell = ws_nwc.cell(row=6, column=3 + i, value=fixed)
-            cell.number_format = NUM_FMT
-            cell.fill = INPUT_FILL
+            prev = base_nwc_val if i == 0 else f"{get_column_letter(3+i-1)}7"
+            prevref = prev if i == 0 else prev
+            if i == 0:
+                ws_nwc.cell(row=8, column=3 + i, value=f"={col}7-{base_nwc_val}").number_format = NUM_FMT
+            else:
+                ws_nwc.cell(row=8, column=3 + i, value=f"={col}7-{get_column_letter(3+i-1)}7").number_format = NUM_FMT
+    else:
         _label(ws_nwc, 8, 2, "ΔNWC(현금유출, +)", bold=True)
         for i in range(n):
             col = get_column_letter(3 + i)
             ws_nwc.cell(row=8, column=3 + i, value=f"={col}6").number_format = NUM_FMT
-    for c in range(2, 3 + n):
-        ws_nwc.column_dimensions[get_column_letter(c)].width = 14
-    dnwc_row = 8
+    _col_widths(ws_nwc, n + 1)
+    dnwc_row_out = 8
+    nwc_balance_row = 7 if nwc_method == 'pct_revenue' else None
 
-    # ────────────────────────────────────────────────────────────────
-    # 6. WACC / Tax 가정
-    # ────────────────────────────────────────────────────────────────
-    ws_w = wb.create_sheet("WACC_Tax")
-    _title(ws_w, "WACC · 세율 가정", span=4)
+    # ════════════════════════════════════════════════════════════════
+    # 7. Debt
+    # ════════════════════════════════════════════════════════════════
+    ws_debt = wb.create_sheet("Debt")
+    _title(ws_debt, "차입금 · 이자 (단위: 백만원)", span=2 + n)
+    _year_header(ws_debt, 4, 3, proj_years)
 
-    tax_rate = asmp.get('tax_rate', 22.0)
-    rf = asmp.get('risk_free_rate', 3.5)
-    beta = asmp.get('beta', 1.0)
-    erp = asmp.get('equity_risk_premium', 5.5)
-    cost_of_equity_direct = asmp.get('cost_of_equity')
-    kd_pre = asmp.get('cost_of_debt', 5.0)
-    debt_weight = asmp.get('debt_weight')
-    total_debt_억 = hist['total_debt'].get(base_year, 0) / 1e6
-    total_equity_억 = hist['total_equity'].get(base_year, 0) / 1e6
+    _label(ws_debt, 6, 2, "기초 차입금")
+    base_debt_col = get_column_letter(3 + len(hist_years) - 1)
+    for i in range(n):
+        col = get_column_letter(3 + i)
+        prev = f"BS!{base_debt_col}{bs_row['total_debt']}" if i == 0 else f"{get_column_letter(3+i-1)}7"
+        ws_debt.cell(row=6, column=3 + i, value=f"={prev}").number_format = NUM_FMT
+    _label(ws_debt, 7, 2, "기말 차입금", bold=True)
+    for i in range(n):
+        ws_debt.cell(row=7, column=3 + i, value=f"={C(cr['debt_balance'], i)}").number_format = NUM_FMT
+    _label(ws_debt, 8, 2, "차입금 변동(+조달/-상환)")
+    for i in range(n):
+        col = get_column_letter(3 + i)
+        ws_debt.cell(row=8, column=3 + i, value=f"={col}7-{col}6").number_format = NUM_FMT
+    _label(ws_debt, 10, 2, "적용 이자율(%)")
+    for i in range(n):
+        ws_debt.cell(row=10, column=3 + i, value=f"={C(cr['interest_rate'], i)}").number_format = PCT_FMT
+    _label(ws_debt, 11, 2, "이자비용 (평균차입금 기준)", bold=True)
+    for i in range(n):
+        col = get_column_letter(3 + i)
+        ws_debt.cell(row=11, column=3 + i, value=f"=AVERAGE({col}6:{col}7)*{col}10").number_format = NUM_FMT
+    _col_widths(ws_debt, n + 1)
+    debt_end_row, debt_delta_row, interest_row = 7, 8, 11
 
-    fields = [
-        ("법인세율(%)", tax_rate / 100.0, PCT_FMT, 4),
-        ("무위험수익률 Rf(%)", rf / 100.0, PCT_FMT, 5),
-        ("베타(β)", beta, '0.00', 6),
-        ("시장위험프리미엄 ERP(%)", erp / 100.0, PCT_FMT, 7),
-        ("타인자본비용(세전 Kd, %)", kd_pre / 100.0, PCT_FMT, 8),
-    ]
-    for r0, (label, val, fmt, row) in enumerate([(l, v, f, rw) for (l, v, f, rw) in fields]):
-        _label(ws_w, row, 2, label)
-        cell = ws_w.cell(row=row, column=3, value=val)
-        cell.number_format = fmt
-        cell.fill = INPUT_FILL
+    # ════════════════════════════════════════════════════════════════
+    # 8. Tax
+    # ════════════════════════════════════════════════════════════════
+    ws_tax = wb.create_sheet("Tax")
+    _title(ws_tax, "법인세", span=2 + n)
+    _year_header(ws_tax, 4, 3, proj_years)
+    _label(ws_tax, 6, 2, "법인세율(%)", bold=True)
+    for i in range(n):
+        ws_tax.cell(row=6, column=3 + i, value=f"={C(cr['tax_rate'])}").number_format = PCT_FMT
+    _col_widths(ws_tax, n + 1)
+    tax_rate_row = 6
 
-    _label(ws_w, 9, 2, "자기자본비용 Ke (CAPM)", bold=True)
-    ws_w.cell(row=9, column=3, value="=C5+C6*C7").number_format = PCT_FMT
-    if cost_of_equity_direct is not None:
-        _label(ws_w, 10, 2, "자기자본비용 직접입력(%) — 입력 시 CAPM 대체")
-        ws_w.cell(row=10, column=3, value=cost_of_equity_direct / 100.0).number_format = PCT_FMT
-        ws_w.cell(row=10, column=3).fill = INPUT_FILL
-        ke_formula = "=IF(C10>0,C10,C9)"
-    else:
-        _label(ws_w, 10, 2, "자기자본비용 직접입력(%) — 입력 시 CAPM 대체")
-        ws_w.cell(row=10, column=3, value=0).number_format = PCT_FMT
-        ws_w.cell(row=10, column=3).fill = INPUT_FILL
-        ke_formula = "=IF(C10>0,C10,C9)"
-    _label(ws_w, 11, 2, "최종 Ke", bold=True)
-    ws_w.cell(row=11, column=3, value=ke_formula).number_format = PCT_FMT
+    # ════════════════════════════════════════════════════════════════
+    # 9. WACC
+    # ════════════════════════════════════════════════════════════════
+    ws_w = wb.create_sheet("WACC")
+    _title(ws_w, "WACC 산출", span=4)
+    _label(ws_w, 4, 2, "무위험수익률 Rf(%)")
+    ws_w.cell(row=4, column=3, value=f"={C(cr['rf'][0])}").number_format = PCT_FMT
+    _label(ws_w, 5, 2, "베타(β)")
+    ws_w.cell(row=5, column=3, value=f"={C(cr['beta'][0])}").number_format = '0.00'
+    _label(ws_w, 6, 2, "시장위험프리미엄 ERP(%)")
+    ws_w.cell(row=6, column=3, value=f"={C(cr['erp'][0])}").number_format = PCT_FMT
+    _label(ws_w, 7, 2, "타인자본비용 세전 Kd(%)")
+    ws_w.cell(row=7, column=3, value=f"={C(cr['kd'][0])}").number_format = PCT_FMT
+    _label(ws_w, 8, 2, "자기자본비용 Ke (CAPM)", bold=True)
+    ws_w.cell(row=8, column=3, value="=C4+C5*C6").number_format = PCT_FMT
+    _label(ws_w, 9, 2, "자기자본비용 직접입력(%, 0=CAPM)")
+    ws_w.cell(row=9, column=3, value=f"={C(cr['ke_direct'][0])}").number_format = PCT_FMT
+    _label(ws_w, 10, 2, "최종 Ke", bold=True)
+    ws_w.cell(row=10, column=3, value="=IF(C9>0,C9,C8)").number_format = PCT_FMT
+    _label(ws_w, 12, 2, "총차입금")
+    ws_w.cell(row=12, column=3, value=f"=BS!{base_debt_col}{bs_row['total_debt']}").number_format = NUM_FMT
+    _label(ws_w, 13, 2, "총자본")
+    ws_w.cell(row=13, column=3, value=f"=BS!{base_debt_col}{bs_row['total_equity']}").number_format = NUM_FMT
+    _label(ws_w, 14, 2, "타인자본비중 직접입력(%, 0=BS기준)")
+    ws_w.cell(row=14, column=3, value=f"={C(cr['dw_direct'][0])}").number_format = PCT_FMT
+    _label(ws_w, 15, 2, "타인자본비중(Dw)", bold=True)
+    ws_w.cell(row=15, column=3, value="=IF(C14>0,C14,C12/(C12+C13))").number_format = PCT_FMT
+    _label(ws_w, 16, 2, "자기자본비중(Ew)", bold=True)
+    ws_w.cell(row=16, column=3, value="=1-C15").number_format = PCT_FMT
+    _label(ws_w, 18, 2, "WACC", bold=True)
+    ws_w.cell(row=18, column=3, value=f"=C16*C10+C15*(C7*(1-Tax!C{tax_rate_row}))").number_format = PCT_FMT
+    _label(ws_w, 20, 2, "영구성장률(TGR, %)", bold=True)
+    ws_w.cell(row=20, column=3, value=f"={C(cr['tgr'][0])}").number_format = PCT_FMT
+    ws_w.column_dimensions['B'].width = 32
+    ws_w.column_dimensions['C'].width = 14
+    wacc_cell, tgr_cell = "WACC!$C$18", "WACC!$C$20"
 
-    _label(ws_w, 13, 2, "총차입금(백만원)")
-    ws_w.cell(row=13, column=3, value=total_debt_억).number_format = NUM_FMT
-    _label(ws_w, 14, 2, "총자본(백만원)")
-    ws_w.cell(row=14, column=3, value=total_equity_억).number_format = NUM_FMT
-    if debt_weight is not None:
-        _label(ws_w, 15, 2, "타인자본 비중 직접입력(%)")
-        ws_w.cell(row=15, column=3, value=debt_weight / 100.0).number_format = PCT_FMT
-        ws_w.cell(row=15, column=3).fill = INPUT_FILL
-        dw_formula = "=IF(C15>0,C15,C13/(C13+C14))"
-    else:
-        _label(ws_w, 15, 2, "타인자본 비중 직접입력(%)")
-        ws_w.cell(row=15, column=3, value=0).number_format = PCT_FMT
-        ws_w.cell(row=15, column=3).fill = INPUT_FILL
-        dw_formula = "=IF(C15>0,C15,C13/(C13+C14))"
-    _label(ws_w, 16, 2, "타인자본 비중(Dw)", bold=True)
-    ws_w.cell(row=16, column=3, value=dw_formula).number_format = PCT_FMT
-    _label(ws_w, 17, 2, "자기자본 비중(Ew)", bold=True)
-    ws_w.cell(row=17, column=3, value="=1-C16").number_format = PCT_FMT
+    # ════════════════════════════════════════════════════════════════
+    # 10. FS — 추정 IS / BS / CS (3대 재무제표 통합)
+    # ════════════════════════════════════════════════════════════════
+    ws_fs = wb.create_sheet("FS")
+    _title(ws_fs, "추정 재무제표 (IS·BS·CS, 단위: 백만원)", span=2 + n)
+    _year_header(ws_fs, 4, 3, proj_years)
 
-    _label(ws_w, 19, 2, "WACC", bold=True)
-    ws_w.cell(row=19, column=3, value="=C17*C11+C16*(C8*(1-C4))").number_format = PCT_FMT
+    fs = {}
+    rr = 6
+    _label(ws_fs, rr, 2, "[추정 손익계산서]", bold=True); rr += 1
+    fs['revenue'] = rr; _label(ws_fs, rr, 2, "매출액"); rr += 1
+    fs['cogs'] = rr; _label(ws_fs, rr, 2, "(매출원가)"); rr += 1
+    fs['gp'] = rr; _label(ws_fs, rr, 2, "매출총이익"); rr += 1
+    fs['sga'] = rr; _label(ws_fs, rr, 2, "(판관비)"); rr += 1
+    fs['ebit'] = rr; _label(ws_fs, rr, 2, "영업이익(EBIT)", bold=True); rr += 1
+    fs['interest'] = rr; _label(ws_fs, rr, 2, "(이자비용)"); rr += 1
+    fs['pretax'] = rr; _label(ws_fs, rr, 2, "세전이익"); rr += 1
+    fs['tax'] = rr; _label(ws_fs, rr, 2, "(법인세)"); rr += 1
+    fs['ni'] = rr; _label(ws_fs, rr, 2, "순이익", bold=True); rr += 2
 
-    _label(ws_w, 21, 2, "영구성장률(TGR, %)", bold=True)
-    ws_w.cell(row=21, column=3, value=tgr / 100.0).number_format = PCT_FMT
-    ws_w.cell(row=21, column=3).fill = INPUT_FILL
+    _label(ws_fs, rr, 2, "[추정 재무상태표]", bold=True); rr += 1
+    fs['ar'] = rr; _label(ws_fs, rr, 2, "매출채권+재고-매입채무(NWC)"); rr += 1
+    fs['ppe_delta'] = rr; _label(ws_fs, rr, 2, "CapEx - D&A (순고정자산 변동)"); rr += 1
+    fs['debt'] = rr; _label(ws_fs, rr, 2, "차입금(기말)"); rr += 1
+    fs['div'] = rr; _label(ws_fs, rr, 2, "배당금"); rr += 1
+    fs['equity'] = rr; _label(ws_fs, rr, 2, "자본(기말) = 기초자본+순이익-배당", bold=True); rr += 1
+    fs['cash_end'] = rr; _label(ws_fs, rr, 2, "현금(기말, plug)", bold=True); rr += 2
 
-    ws_w.column_dimensions["B"].width = 30
-    ws_w.column_dimensions["C"].width = 14
+    _label(ws_fs, rr, 2, "[추정 현금흐름표]", bold=True); rr += 1
+    fs['cfo'] = rr; _label(ws_fs, rr, 2, "영업활동현금흐름 = 순이익+D&A-ΔNWC"); rr += 1
+    fs['cfi'] = rr; _label(ws_fs, rr, 2, "투자활동현금흐름 = -CapEx"); rr += 1
+    fs['cff'] = rr; _label(ws_fs, rr, 2, "재무활동현금흐름 = ΔDebt-배당"); rr += 1
+    fs['cf_net'] = rr; _label(ws_fs, rr, 2, "현금증감", bold=True); rr += 1
 
-    # ────────────────────────────────────────────────────────────────
-    # 7. DCF
-    # ────────────────────────────────────────────────────────────────
+    base_equity_col = get_column_letter(3 + len(hist_years) - 1)
+    base_cash_col = base_equity_col
+    for i in range(n):
+        col = get_column_letter(3 + i)
+        prevcol = get_column_letter(3 + i - 1) if i > 0 else None
+        ws_fs.cell(row=fs['revenue'], column=3+i, value=f"=Revenue!{col}{rev_row}").number_format = NUM_FMT
+        ws_fs.cell(row=fs['cogs'], column=3+i, value=f"=-COGS!{col}{cogs_row_out}").number_format = NUM_FMT
+        ws_fs.cell(row=fs['gp'], column=3+i, value=f"={col}{fs['revenue']}+{col}{fs['cogs']}").number_format = NUM_FMT
+        ws_fs.cell(row=fs['sga'], column=3+i, value=f"=-'SG&A'!{col}{sga_row_out}").number_format = NUM_FMT
+        ws_fs.cell(row=fs['ebit'], column=3+i, value=f"={col}{fs['gp']}+{col}{fs['sga']}").number_format = NUM_FMT
+        ws_fs.cell(row=fs['interest'], column=3+i, value=f"=-Debt!{col}{interest_row}").number_format = NUM_FMT
+        ws_fs.cell(row=fs['pretax'], column=3+i, value=f"={col}{fs['ebit']}+{col}{fs['interest']}").number_format = NUM_FMT
+        ws_fs.cell(row=fs['tax'], column=3+i, value=f"=-MAX({col}{fs['pretax']},0)*Tax!{col}{tax_rate_row}").number_format = NUM_FMT
+        ws_fs.cell(row=fs['ni'], column=3+i, value=f"={col}{fs['pretax']}+{col}{fs['tax']}").number_format = NUM_FMT
+        ws_fs.cell(row=fs['ni'], column=3+i).font = BOLD
+
+        ws_fs.cell(row=fs['ar'], column=3+i, value=f"=NWC!{col}{nwc_balance_row}" if nwc_balance_row else 0).number_format = NUM_FMT
+        ws_fs.cell(row=fs['ppe_delta'], column=3+i, value=f"='D&A CAPEX'!{col}{capex_row_out}-'D&A CAPEX'!{col}{da_row_out}").number_format = NUM_FMT
+        ws_fs.cell(row=fs['debt'], column=3+i, value=f"=Debt!{col}{debt_end_row}").number_format = NUM_FMT
+
+        if div_method == 'payout_ratio':
+            ws_fs.cell(row=fs['div'], column=3+i, value=f"=MAX({col}{fs['ni']},0)*{C(cr['dividend'], i)}").number_format = NUM_FMT
+        else:
+            shares_ref = C(cr['shares'][0])
+            ws_fs.cell(row=fs['div'], column=3+i, value=f"={C(cr['dividend'], i)}*{shares_ref}/1000000").number_format = NUM_FMT
+
+        prev_equity = f"BS!{base_equity_col}{bs_row['total_equity']}" if i == 0 else f"{prevcol}{fs['equity']}"
+        ws_fs.cell(row=fs['equity'], column=3+i, value=f"={prev_equity}+{col}{fs['ni']}-{col}{fs['div']}").number_format = NUM_FMT
+        ws_fs.cell(row=fs['equity'], column=3+i).font = BOLD
+
+        ws_fs.cell(row=fs['cfo'], column=3+i, value=f"={col}{fs['ni']}+'D&A CAPEX'!{col}{da_row_out}-NWC!{col}{dnwc_row_out}").number_format = NUM_FMT
+        ws_fs.cell(row=fs['cfi'], column=3+i, value=f"=-'D&A CAPEX'!{col}{capex_row_out}").number_format = NUM_FMT
+        ws_fs.cell(row=fs['cff'], column=3+i, value=f"=Debt!{col}{debt_delta_row}-{col}{fs['div']}").number_format = NUM_FMT
+        ws_fs.cell(row=fs['cf_net'], column=3+i, value=f"={col}{fs['cfo']}+{col}{fs['cfi']}+{col}{fs['cff']}").number_format = NUM_FMT
+        ws_fs.cell(row=fs['cf_net'], column=3+i).font = BOLD
+
+        prev_cash = f"BS!{base_cash_col}{bs_row['cash']}" if i == 0 else f"{prevcol}{fs['cash_end']}"
+        ws_fs.cell(row=fs['cash_end'], column=3+i, value=f"={prev_cash}+{col}{fs['cf_net']}").number_format = NUM_FMT
+
+    _col_widths(ws_fs, n + 1, 16)
+
+    # ════════════════════════════════════════════════════════════════
+    # 11. DCF
+    # ════════════════════════════════════════════════════════════════
     ws_d = wb.create_sheet("DCF")
     _title(ws_d, f"{company_name} — DCF (단위: 백만원)", span=2 + n)
     _year_header(ws_d, 4, 3, proj_years)
@@ -387,53 +585,52 @@ def build_excel_workbook(company_name, hist, asmp, fcff_df, pv_fcff_df,
 
     for i in range(n):
         col = get_column_letter(3 + i)
-        ws_d.cell(row=6, column=3 + i, value=f"=Revenue!{col}10").number_format = NUM_FMT
-        ws_d.cell(row=7, column=3 + i, value=f"=-COGS_SGA!{col}{cogs_row}").number_format = NUM_FMT
-        ws_d.cell(row=8, column=3 + i, value=f"={col}6+{col}7").number_format = NUM_FMT
-        ws_d.cell(row=9, column=3 + i, value=f"=-COGS_SGA!{col}{sga_row}").number_format = NUM_FMT
-        ws_d.cell(row=10, column=3 + i, value=f"={col}8+{col}9").number_format = NUM_FMT
-        ws_d.cell(row=11, column=3 + i, value=f"={col}10*(1-WACC_Tax!$C$4)").number_format = NUM_FMT
-        ws_d.cell(row=12, column=3 + i, value=f"=DA_CAPEX!{col}{da_row}").number_format = NUM_FMT
-        ws_d.cell(row=13, column=3 + i, value=f"=-DA_CAPEX!{col}{capex_row}").number_format = NUM_FMT
-        ws_d.cell(row=14, column=3 + i, value=f"=-NWC!{col}{dnwc_row}").number_format = NUM_FMT
-        ws_d.cell(row=15, column=3 + i, value=f"=SUM({col}11:{col}14)").number_format = NUM_FMT
-        ws_d.cell(row=15, column=3 + i).font = BOLD
-        ws_d.cell(row=16, column=3 + i, value=f"=1/(1+WACC_Tax!$C$19)^{i+1}").number_format = '0.0000'
-        ws_d.cell(row=17, column=3 + i, value=f"={col}15*{col}16").number_format = NUM_FMT
+        ws_d.cell(row=6, column=3+i, value=f"=Revenue!{col}{rev_row}").number_format = NUM_FMT
+        ws_d.cell(row=7, column=3+i, value=f"=-COGS!{col}{cogs_row_out}").number_format = NUM_FMT
+        ws_d.cell(row=8, column=3+i, value=f"={col}6+{col}7").number_format = NUM_FMT
+        ws_d.cell(row=9, column=3+i, value=f"=-'SG&A'!{col}{sga_row_out}").number_format = NUM_FMT
+        ws_d.cell(row=10, column=3+i, value=f"={col}8+{col}9").number_format = NUM_FMT
+        ws_d.cell(row=11, column=3+i, value=f"={col}10*(1-Tax!{col}{tax_rate_row})").number_format = NUM_FMT
+        ws_d.cell(row=12, column=3+i, value=f"='D&A CAPEX'!{col}{da_row_out}").number_format = NUM_FMT
+        ws_d.cell(row=13, column=3+i, value=f"=-'D&A CAPEX'!{col}{capex_row_out}").number_format = NUM_FMT
+        ws_d.cell(row=14, column=3+i, value=f"=-NWC!{col}{dnwc_row_out}").number_format = NUM_FMT
+        ws_d.cell(row=15, column=3+i, value=f"=SUM({col}11:{col}14)").number_format = NUM_FMT
+        ws_d.cell(row=15, column=3+i).font = BOLD
+        ws_d.cell(row=16, column=3+i, value=f"=1/(1+{wacc_cell})^{i+1}").number_format = '0.0000'
+        ws_d.cell(row=17, column=3+i, value=f"={col}15*{col}16").number_format = NUM_FMT
 
     last_col = get_column_letter(2 + n)
     _label(ws_d, 20, 2, "PV(FCFF) 합계", bold=True)
     ws_d.cell(row=20, column=3, value=f"=SUM(C17:{last_col}17)").number_format = NUM_FMT
 
-    # Terminal Value — 할인 전 마지막해 FCFF * (1+g)/(WACC-g), 그 다음 마지막해
-    # 할인계수를 한 번만 곱한다 (예전 템플릿의 N24 버그: PV(FCFF)에 할인계수를
-    # 중복 적용했던 것을 여기서는 처음부터 올바르게 구현).
+    # Terminal Value: 마지막 연도의 "할인 전" FCFF를 기준으로 영구가치를 구하고,
+    # 마지막 연도의 할인계수를 한 번만 곱해서 PV(TV)를 구한다 (참고 양식에 있던
+    # "PV(FCFF)에 할인계수를 중복 적용"하는 오류를 여기서는 처음부터 피함).
     _label(ws_d, 21, 2, "Terminal Value(할인 전)", bold=True)
-    ws_d.cell(row=21, column=3, value=f"={last_col}15*(1+WACC_Tax!$C$21)/(WACC_Tax!$C$19-WACC_Tax!$C$21)").number_format = NUM_FMT
+    ws_d.cell(row=21, column=3, value=f"={last_col}15*(1+{tgr_cell})/({wacc_cell}-{tgr_cell})").number_format = NUM_FMT
     _label(ws_d, 22, 2, "PV(Terminal Value)", bold=True)
     ws_d.cell(row=22, column=3, value=f"=C21*{last_col}16").number_format = NUM_FMT
 
     _label(ws_d, 24, 2, "기업가치(EV)", bold=True)
     ws_d.cell(row=24, column=3, value="=C20+C22").number_format = NUM_FMT
     _label(ws_d, 25, 2, "(-) 순차입금")
-    net_debt_mm = net_debt / 1e6
-    ws_d.cell(row=25, column=3, value=net_debt_mm).number_format = NUM_FMT
+    ws_d.cell(row=25, column=3, value=net_debt / 1e6).number_format = NUM_FMT
     ws_d.cell(row=25, column=3).fill = INPUT_FILL
     _label(ws_d, 26, 2, "자기자본가치", bold=True)
     ws_d.cell(row=26, column=3, value="=C24-C25").number_format = NUM_FMT
     _label(ws_d, 27, 2, "발행주식수")
-    ws_d.cell(row=27, column=3, value=shares if shares else 0).number_format = '#,##0'
-    ws_d.cell(row=27, column=3).fill = INPUT_FILL
+    ws_d.cell(row=27, column=3, value=f"={C(cr['shares'][0])}").number_format = '#,##0'
     _label(ws_d, 28, 2, "주당가치(원)", bold=True)
     ws_d.cell(row=28, column=3, value="=IF(C27>0,C26*1000000/C27,\"N/A\")").number_format = '#,##0'
 
-    for c in range(2, 3 + n):
-        ws_d.column_dimensions[get_column_letter(c)].width = 14
+    _col_widths(ws_d, n + 1)
 
-    wb._sheets = [
-        wb["DCF"], wb["재무제표(과거)"], wb["Revenue"], wb["COGS_SGA"],
-        wb["DA_CAPEX"], wb["NWC"], wb["WACC_Tax"],
-    ]
+    # ────────────────────────────────────────────────────────────────
+    # 시트 순서: Control, DCF, WACC, FS, Revenue, COGS, SG&A, D&A CAPEX, NWC, Debt, Tax, BS, IS, CS
+    # ────────────────────────────────────────────────────────────────
+    order = ["Control", "DCF", "WACC", "FS", "Revenue", "COGS", "SG&A",
+             "D&A CAPEX", "NWC", "Debt", "Tax", "BS", "IS", "CS"]
+    wb._sheets = [wb[name] for name in order]
 
     output = io.BytesIO()
     wb.save(output)

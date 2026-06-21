@@ -123,6 +123,8 @@ def extract_historical_summary(financial_data: dict, years: list) -> dict:
         'selling_expense': {}, 'admin_expense': {},
         # 주식수
         'shares_outstanding': {},
+        # 차입금/이자/배당
+        'interest_expense': {}, 'dividends_paid': {}, 'implied_interest_rate': {},
     }
     for yr in years:
         yr_data = financial_data.get(str(yr), {})
@@ -174,6 +176,13 @@ def extract_historical_summary(financial_data: dict, years: list) -> dict:
 
         # 주식수
         summary['shares_outstanding'][yr] = bs_data.get('shares_outstanding', 0)
+
+        # 차입금/이자/배당: 평균 차입금 대비 이자비용으로 implied 이자율 산출
+        interest_exp = is_data.get('interest_expense', 0)
+        total_debt_yr = bs_data.get('total_debt', 0)
+        summary['interest_expense'][yr] = interest_exp
+        summary['dividends_paid'][yr] = cf_data.get('dividends_paid', 0)
+        summary['implied_interest_rate'][yr] = safe_div(interest_exp, total_debt_yr, 0) * 100 if total_debt_yr > 0 else 0
 
     return summary
 
@@ -1046,8 +1055,44 @@ elif page == 'DCF 가정 입력':
 
     st.divider()
 
-    # ── 5. 세율 ──────────────────────────────────────────────────────────────
-    st.subheader("5. 세율")
+    # ── 5. 차입금 / 이자 / 배당 ─────────────────────────────────────────────────
+    st.subheader("5. 차입금 / 이자 / 배당 가정")
+    st.caption("추정 재무상태표(BS)·현금흐름표(CS) 작성을 위한 가정입니다 (FCFF/DCF 결과 자체에는 영향 없음).")
+
+    st.markdown("**차입금 (연도별 기말 잔액, 억원)**")
+    base_debt_억 = hist['total_debt'].get(base_year, 0) / 1e8
+    st.write(f"기준연도({base_year}) 차입금: **{base_debt_억:,.1f}억원**")
+    prev_debt_list = asmp.get('debt_balance_list', [round(base_debt_억, 1)] * n)
+    cols_debt = st.columns(n)
+    debt_list = []
+    for i, col in enumerate(cols_debt):
+        with col:
+            dv = col.number_input(f"{proj_years[i]}년", value=float(prev_debt_list[i] if i < len(prev_debt_list) else base_debt_억),
+                                   step=1.0, key=f"debt_bal_{i}")
+            debt_list.append(dv)
+    asmp['debt_balance_list'] = debt_list
+
+    st.markdown("**이자율**")
+    implied_rates = [hist['implied_interest_rate'].get(yr, 0) for yr in hist_years if hist['implied_interest_rate'].get(yr, 0) > 0]
+    default_rate = round(sum(implied_rates) / len(implied_rates), 2) if implied_rates else 4.0
+    st.caption(f"과거 평균 implied 이자율(이자비용/차입금) = {default_rate:.2f}% 를 기본값으로 사용합니다. 필요시 직접 수정하세요.")
+    asmp['interest_rate'] = st.number_input("적용 이자율 (%)", value=float(asmp.get('interest_rate', default_rate)),
+                                              min_value=0.0, max_value=30.0, step=0.1)
+
+    st.markdown("**배당**")
+    div_method = st.radio("배당 방법", ['배당성향 (순이익 대비 %)', '주당 고정 배당금'], horizontal=True,
+                          index=0 if asmp.get('dividend_method', 'payout_ratio') == 'payout_ratio' else 1)
+    asmp['dividend_method'] = 'payout_ratio' if div_method == '배당성향 (순이익 대비 %)' else 'fixed_dps'
+    if asmp['dividend_method'] == 'payout_ratio':
+        asmp['dividend_payout_pct'] = st.number_input("배당성향 (%)", value=float(asmp.get('dividend_payout_pct', 0.0)),
+                                                         min_value=0.0, max_value=100.0, step=1.0)
+    else:
+        asmp['dividend_per_share'] = st.number_input("주당 배당금 (원)", value=float(asmp.get('dividend_per_share', 0.0)), step=10.0)
+
+    st.divider()
+
+    # ── 6. 세율 ──────────────────────────────────────────────────────────────
+    st.subheader("6. 세율")
     tax_method = st.radio("세율 방법", ['누진세율 자동계산 (2026 한국)', '직접 입력'], horizontal=True,
                           index=0 if asmp.get('tax_method','progressive')=='progressive' else 1)
     asmp['tax_method'] = 'progressive' if tax_method == '누진세율 자동계산 (2026 한국)' else 'direct'
@@ -1075,7 +1120,7 @@ elif page == 'DCF 가정 입력':
     st.divider()
 
     # ── 6. WACC ──────────────────────────────────────────────────────────────
-    st.subheader("6. WACC 입력")
+    st.subheader("7. WACC 입력")
     col1, col2 = st.columns(2)
 
     with col1:
@@ -1125,7 +1170,7 @@ elif page == 'DCF 가정 입력':
     st.divider()
 
     # ── 7. 터미널 밸류 ────────────────────────────────────────────────────────
-    st.subheader("7. 터미널 밸류 (Terminal Value)")
+    st.subheader("8. 터미널 밸류 (Terminal Value)")
     st.caption("Gordon Growth Model: TV = FCFF_n × (1+g) / (WACC - g)")
     asmp['terminal_growth_rate'] = st.number_input("영구성장률 TGR (%)",
                                                     value=float(asmp.get('terminal_growth_rate', 1.5)),
@@ -1135,7 +1180,7 @@ elif page == 'DCF 가정 입력':
     st.divider()
 
     # ── 8. 기타 ──────────────────────────────────────────────────────────────
-    st.subheader("8. 기타")
+    st.subheader("9. 기타")
     col1, col2 = st.columns(2)
     with col1:
         asmp['shares_outstanding'] = st.number_input("발행주식수 (주)",

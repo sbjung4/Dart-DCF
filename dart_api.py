@@ -157,6 +157,18 @@ ACCOUNT_MAP = {
         'ifrs-full_DepreciationAmortisationAndImpairmentLoss',
         'DepreciationAndAmortisation',
     ],
+    'interest_expense': [
+        'ifrs-full_InterestExpense',
+        'dart_InterestExpense',
+        'InterestExpense',
+        'ifrs-full_FinanceCosts',
+        'dart_FinanceCosts',
+    ],
+    'dividends_paid': [
+        'ifrs-full_DividendsPaid',
+        'dart_DividendsPaid',
+        'DividendsPaidClassifiedAsFinancingActivities',
+    ],
     # Balance Sheet
     'total_assets': [
         'ifrs-full_Assets',
@@ -298,6 +310,8 @@ KOREAN_NAME_KEYWORDS = {
     'inventory': ['재고자산'],
     'accounts_payable': ['매입채무'],
     'shares_outstanding': ['발행주식수', '유통주식수', '보통주식수'],
+    'interest_expense': ['이자비용', '금융원가', '금융비용'],
+    'dividends_paid': ['배당금의지급', '배당금지급'],
 }
 
 # 감가상각비/상각비와 무관하게 "상각"이라는 단어가 들어가는 회계/금융 계정
@@ -447,6 +461,9 @@ def _extract_financials_from_items(items):
             if it.get('account_nm')
         ]
 
+    interest_expense = _lookup_account(is_map, ACCOUNT_MAP['interest_expense'], KOREAN_NAME_KEYWORDS['interest_expense'])
+    dividends_paid = abs(_lookup_account(cf_map, ACCOUNT_MAP['dividends_paid'], KOREAN_NAME_KEYWORDS['dividends_paid']))
+
     # Extract BS metrics
     total_assets = _lookup_account(bs_map, ACCOUNT_MAP['total_assets'])
     current_assets = _lookup_account(bs_map, ACCOUNT_MAP['current_assets'])
@@ -488,6 +505,7 @@ def _extract_financials_from_items(items):
             'da_ppe': da_ppe,
             'da_intangible': da_intangible,
             'da_rou': da_rou,
+            'interest_expense': interest_expense,
         },
         'balance_sheet': {
             'total_assets': total_assets,
@@ -507,6 +525,7 @@ def _extract_financials_from_items(items):
             'financing_cf': financing_cf,
             'capex': capex,
             'da': da_cf if da_cf > 0 else da,
+            'dividends_paid': dividends_paid,
             '_da_debug_items': da_debug_items,
         }
     }
