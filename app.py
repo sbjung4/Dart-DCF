@@ -323,6 +323,7 @@ if page == '기업 검색':
                         years = [base_year, base_year - 1, base_year - 2]
 
                         financial_data = {}
+                        no_data_years = []
                         for yr in years:
                             try:
                                 # 역사적 비교는 항상 연간(사업보고서) 기준
@@ -330,9 +331,24 @@ if page == '기업 검색':
                                                               report_type='11011',
                                                               fs_div=fs_div)
                                 financial_data[str(yr)] = fs
+                                if fs.get('_no_data'):
+                                    no_data_years.append(yr)
                             except Exception as e:
                                 st.warning(f"{yr}년 데이터 로드 실패: {str(e)}")
                                 financial_data[str(yr)] = {}
+                                no_data_years.append(yr)
+
+                        if len(no_data_years) == len(years):
+                            st.error(
+                                f"❌ {selected_co['corp_name']}의 재무제표를 찾을 수 없습니다. "
+                                "감사보고서만 제출하는 비상장 외부감사대상 법인은 DART Open API의 "
+                                "표준 재무제표(전체계정) 조회 대상이 아니어서 이 화면에서는 불러올 수 없습니다. "
+                                "감사보고서 원문은 DART 웹사이트(dart.fss.or.kr)에서 직접 확인해주세요."
+                            )
+                            st.session_state.financial_data = financial_data
+                            st.stop()
+                        elif no_data_years:
+                            st.warning(f"{', '.join(str(y)+'년' for y in no_data_years)} 데이터를 찾을 수 없어 제외되었습니다.")
 
                         # 분기 보고서를 선택한 경우 기준연도 분기 데이터 별도 보관
                         if reprt_code != '11011':

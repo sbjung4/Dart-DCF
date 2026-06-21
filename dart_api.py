@@ -493,39 +493,54 @@ def get_financial_statements(corp_code, year, api_key, report_type='11011', fs_d
     Fetch financial statements from DART API.
     report_type: 11011=사업보고서, 11012=반기보고서, 11013=1분기, 11014=3분기
     fs_div: CFS=연결, OFS=개별
+
+    fnlttSinglAcntAll은 정기보고서(사업/반기/분기보고서)를 제출한 법인에 대해서만
+    데이터를 제공합니다. 감사보고서만 제출하는 비상장 외부감사대상 법인의 경우,
+    같은 연도에 다른 보고서 종류로 데이터가 잡힐 수도 있으므로 요청한
+    report_type이 비어있으면 다른 report_type도 순차적으로 시도합니다.
     """
     key = get_dart_api_key(api_key)
     url = f"{BASE_URL}/fnlttSinglAcntAll.json"
 
-    params = {
-        "crtfc_key": key,
-        "corp_code": corp_code,
-        "bsns_year": str(year),
-        "reprt_code": report_type,
-        "fs_div": fs_div,
-    }
-
-    resp = requests.get(url, params=params, timeout=30)
-    resp.raise_for_status()
-    data = resp.json()
-
-    if data.get('status') == '013':
-        # No data for requested fs_div; try the other
-        fallback = 'OFS' if fs_div == 'CFS' else 'CFS'
-        params['fs_div'] = fallback
+    def _fetch(rprt_code, div):
+        params = {
+            "crtfc_key": key,
+            "corp_code": corp_code,
+            "bsns_year": str(year),
+            "reprt_code": rprt_code,
+            "fs_div": div,
+        }
         resp = requests.get(url, params=params, timeout=30)
         resp.raise_for_status()
-        data = resp.json()
+        return resp.json()
 
-    if data.get('status') not in ('000', '013'):
-        if data.get('status') != '000':
-            raise ValueError(f"DART API Error [{data.get('status')}]: {data.get('message', 'Unknown')}")
+    tried = []
+    report_candidates = [report_type] + [r for r in ('11011', '11014', '11012', '11013') if r != report_type]
+    data = None
+    for rprt_code in report_candidates:
+        for div in (fs_div, 'OFS' if fs_div == 'CFS' else 'CFS'):
+            data = _fetch(rprt_code, div)
+            tried.append((rprt_code, div, data.get('status')))
+            if data.get('status') == '000' and data.get('list'):
+                items = data.get('list', [])
+                result = _extract_financials_from_items(items)
+                result['_report_type_used'] = rprt_code
+                result['_fs_div_used'] = div
+                return result
+            if data.get('status') not in ('000', '013'):
+                raise ValueError(f"DART API Error [{data.get('status')}]: {data.get('message', 'Unknown')}")
 
-    items = data.get('list', [])
-    if not items:
-        return {'income_statement': {}, 'balance_sheet': {}, 'cash_flow': {}}
-
-    return _extract_financials_from_items(items)
+    # 모든 보고서 종류/구분에서 데이터를 찾지 못함 — 정기보고서를 제출하지 않는
+    # (감사보고서만 제출하는) 법인일 가능성이 높음
+    return {
+        'income_statement': {}, 'balance_sheet': {}, 'cash_flow': {},
+        '_no_data': True,
+        '_message': (
+            f"{year}년 정기보고서(사업/반기/분기보고서) 데이터를 찾을 수 없습니다. "
+            "감사보고서만 제출하는 비상장 외부감사대상 법인은 DART Open API의 "
+            "표준 재무제표 조회 대상이 아닙니다 (감사보고서 원문은 DART 웹사이트에서 확인 가능)."
+        ),
+    }
 
 
 def get_business_segments(corp_code, year, api_key=None):
