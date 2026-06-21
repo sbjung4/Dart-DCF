@@ -1456,6 +1456,7 @@ elif page == 'DCF 결과':
                 wacc=wacc, tgr=tgr_c, pv_tv=pv_tv, ev=ev,
                 net_debt=net_debt, eq_val=eq_val, shares=shares,
                 price_per_share=price_per_share, base_year=base_year,
+                financial_data=st.session_state.financial_data,
             )
 
         company_name = st.session_state.selected_company['corp_name'] if st.session_state.selected_company else 'company'

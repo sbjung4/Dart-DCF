@@ -26,12 +26,33 @@ from openpyxl.utils import get_column_letter
 HEADER_FILL = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
 SUBHEADER_FILL = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
 INPUT_FILL = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+GRAY_FILL = PatternFill(start_color="DCDCDC", end_color="DCDCDC", fill_type="solid")
 HEADER_FONT = Font(color="FFFFFF", bold=True, size=11)
 BOLD = Font(bold=True)
 THIN = Side(style="thin", color="BFBFBF")
+THIN_DARK = Side(style="thin", color="808080")
+THICK = Side(style="thin", color="000000")
 BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+ROW_BORDER = Border(left=THIN_DARK, right=THIN_DARK, top=THIN_DARK, bottom=THIN_DARK)
+TOTAL_BORDER = Border(left=THIN_DARK, right=THIN_DARK, top=THIN_DARK, bottom=THICK)
 NUM_FMT = '#,##0.0'
 PCT_FMT = '0.0%'
+ACC_FMT = '#,##0_);(#,##0);-_) '
+ACTUAL_FMT = '#"A"'
+ESTIMATE_FMT = '#"E"'
+SUBTOTAL_MARKS = ('Ⅰ', 'Ⅱ', 'Ⅲ', 'Ⅳ', 'Ⅴ', 'Ⅵ', 'Ⅶ', 'Ⅷ', 'Ⅸ', 'Ⅹ')
+SUBTOTAL_SUFFIXES = ('총계', '총액')
+SUBTOTAL_KEYWORDS = ('순이익', '순손실', '영업이익', '영업손실')
+
+
+def _is_subtotal_label(name):
+    if not name:
+        return False
+    if name.lstrip().startswith(SUBTOTAL_MARKS):
+        return True
+    if name.rstrip().endswith(SUBTOTAL_SUFFIXES):
+        return True
+    return any(kw in name for kw in SUBTOTAL_KEYWORDS)
 
 
 def _title(ws, text, row=2, col=2, span=8):
@@ -73,7 +94,7 @@ def _col_widths(ws, ncols, width=14, start=2):
 
 def build_excel_workbook(company_name, hist, asmp, fcff_df, pv_fcff_df,
                           wacc, tgr, pv_tv, ev, net_debt, eq_val, shares,
-                          price_per_share, base_year):
+                          price_per_share, base_year, financial_data=None):
     wb = Workbook()
     wb.remove(wb.active)
 
@@ -230,43 +251,131 @@ def build_excel_workbook(company_name, hist, asmp, fcff_df, pv_fcff_df,
         return f"Control!{get_column_letter(3+i)}${row}"
 
     # ════════════════════════════════════════════════════════════════
-    # 1. 과거 재무제표 — BS / IS / CS 세 시트
+    # 1. 과거 재무제표 — BS / IS / CS 세 시트 (DART 원본 그대로, 가공 없음)
     # ════════════════════════════════════════════════════════════════
-    def hist_sheet(name, rows):
+    financial_data = financial_data or {}
+
+    def _merged_raw_rows(stmt_key):
+        """여러 연도의 DART 원본 항목을 계정명 기준으로 합치고, 각 계정이
+        보고서에 나타나는 순서(ord)를 기준으로 정렬한다 (가공/요약 없음)."""
+        order_of = {}
+        vals = {}
+        for yr in hist_years:
+            rows = financial_data.get(str(yr), {}).get('raw', {}).get(stmt_key, [])
+            for r in rows:
+                name = r['account_nm']
+                vals.setdefault(name, {})[yr] = r['amount']
+                if name not in order_of or r['ord'] < order_of[name]:
+                    order_of[name] = r['ord']
+        names_sorted = sorted(vals.keys(), key=lambda nm: order_of.get(nm, 0))
+        return names_sorted, vals
+
+    TITLES = {"BS": "재 무 상 태 표", "IS": "손 익 계 산 서", "CS": "현 금 흐 름 표"}
+
+    def raw_hist_sheet(name, stmt_key, fallback_rows=None):
         ws = wb.create_sheet(name)
-        _title(ws, f"{company_name} — 과거 {name} (단위: 백만원)", span=2 + len(hist_years))
-        _label(ws, 4, 2, "항목", bold=True)
-        _year_header(ws, 4, 3, hist_years)
+        ws.sheet_view.showGridLines = False
+        ws.freeze_panes = "C6"
+        title = ws.cell(row=3, column=2, value=TITLES[name])
+        title.font = Font(bold=True, size=13)
+        title.alignment = Alignment(horizontal="center")
+        ws.cell(row=4, column=2, value=company_name)
+        unit = ws.cell(row=4, column=3, value="(단위: 백만원)")
+        unit.alignment = Alignment(horizontal="right")
+
+        hdr = ws.cell(row=5, column=2, value="과목")
+        hdr.font = BOLD
+        hdr.fill = GRAY_FILL
+        hdr.alignment = Alignment(horizontal="center", vertical="center")
+        hdr.border = ROW_BORDER
+        for i, yr in enumerate(hist_years):
+            c = ws.cell(row=5, column=3 + i, value=f"{yr}년")
+            c.font = BOLD
+            c.fill = GRAY_FILL
+            c.alignment = Alignment(horizontal="center", vertical="center")
+            c.border = ROW_BORDER
+
+        names_sorted, vals = _merged_raw_rows(stmt_key)
         row_of = {}
-        rr = 5
-        for label, key in rows:
-            _label(ws, rr, 2, label)
+        rr = 6
+        for name in names_sorted:
+            is_sub = _is_subtotal_label(name)
+            lbl = ws.cell(row=rr, column=2, value=name)
+            lbl.border = ROW_BORDER
+            lbl.alignment = Alignment(horizontal="left", vertical="top")
+            if is_sub:
+                lbl.font = BOLD
+            for i, yr in enumerate(hist_years):
+                v = vals[name].get(yr)
+                c = ws.cell(row=rr, column=3 + i, value=(v / 1e6) if v is not None else None)
+                c.number_format = ACC_FMT
+                c.border = ROW_BORDER
+                c.alignment = Alignment(horizontal="right", vertical="top")
+                if is_sub:
+                    c.font = BOLD
+            row_of[name] = rr
+            rr += 1
+
+        # 마지막 줄(보통 자산총계/부채및자본총계/당기순이익/기말현금)에 굵은
+        # 하단 테두리를 줘서 통계표를 닫는 느낌을 낸다.
+        if rr > 6:
+            for col in range(2, 3 + len(hist_years)):
+                ws.cell(row=rr - 1, column=col).border = TOTAL_BORDER
+
+        # DART 원본 항목명에서 못 찾은 핵심 지표는, 다른 시트의 수식이 항상
+        # 유효한 셀을 참조할 수 있도록 보조행으로 보강한다 (요약 hist 기준).
+        for label, key in (fallback_rows or []):
+            if label in row_of:
+                continue
+            rr += 1
+            lbl = ws.cell(row=rr, column=2, value=f"[보조] {label}")
+            lbl.border = ROW_BORDER
             for i, yr in enumerate(hist_years):
                 v = hist.get(key, {}).get(yr, 0) or 0
-                unit = 1 if key == "shares_outstanding" else 1e6
-                cell = ws.cell(row=rr, column=3 + i, value=v / unit)
-                cell.number_format = NUM_FMT
-            row_of[key] = rr
-            rr += 1
-        _col_widths(ws, len(hist_years) + 1, 16)
-        return row_of
+                c = ws.cell(row=rr, column=3 + i, value=v / 1e6)
+                c.number_format = ACC_FMT
+                c.border = ROW_BORDER
+            row_of[label] = rr
 
-    bs_row = hist_sheet("BS", [
-        ("총자산", "total_assets"), ("유동자산", "current_assets"), ("유동부채", "current_liabilities"),
-        ("현금", "cash"), ("총차입금", "total_debt"), ("총자본", "total_equity"),
-        ("IBD(이자부부채)", "ibd"), ("현금성자산(IBD대응)", "cash_equivalents"), ("순차입금(IBD-현금성자산)", "net_debt"),
-        ("매출채권", "accounts_receivable"), ("재고자산", "inventory"), ("매입채무", "accounts_payable"),
-        ("발행주식수", "shares_outstanding"),
+        ws.column_dimensions['B'].width = 37
+        for i in range(len(hist_years)):
+            ws.column_dimensions[get_column_letter(3 + i)].width = 16
+        return row_of, names_sorted
+
+    def _find_row(row_map, names, keywords):
+        """병합된 raw 항목 중 키워드를 포함하는 첫 계정명의 행 번호를 찾는다."""
+        for nm in names:
+            if any(kw in nm for kw in keywords):
+                return row_map[nm]
+        return None
+
+    bs_raw_rows, bs_names = raw_hist_sheet("BS", "bs", fallback_rows=[
+        ("총자산", "total_assets"), ("총자본", "total_equity"), ("현금", "cash"),
+        ("IBD(이자부부채)", "ibd"), ("순차입금", "net_debt"),
     ])
-    is_row = hist_sheet("IS", [
-        ("매출액", "revenue"), ("매출원가", "cogs"), ("매출총이익", "gross_profit"),
-        ("판매비와관리비", "sga"), ("영업이익(EBIT)", "ebit"), ("이자비용", "interest_expense"),
-        ("순이익", "net_income"),
+    is_raw_rows, is_names = raw_hist_sheet("IS", "is", fallback_rows=[
+        ("매출액", "revenue"), ("매출원가", "cogs"), ("판매비와관리비", "sga"),
     ])
-    cs_row = hist_sheet("CS", [
-        ("영업활동현금흐름", "operating_cf"), ("투자활동현금흐름", "investing_cf"),
-        ("D&A", "da"), ("CapEx", "capex"), ("배당금지급", "dividends_paid"),
+    cs_raw_rows, cs_names = raw_hist_sheet("CS", "cs", fallback_rows=[
+        ("D&A", "da"),
     ])
+
+    # DCF/WACC/Debt 등 다른 시트에서 과거 실적을 참조할 때 쓸 행 번호.
+    # raw 원본에서 우선 찾고, 없으면 위에서 보강한 [보조] 행을 사용한다.
+    bs_row = {
+        'total_assets': _find_row(bs_raw_rows, bs_names, ['자산총계']) or bs_raw_rows.get('총자산'),
+        'total_equity': _find_row(bs_raw_rows, bs_names, ['자본총계']) or bs_raw_rows.get('총자본'),
+        'cash': _find_row(bs_raw_rows, bs_names, ['현금및현금성자산']) or bs_raw_rows.get('현금'),
+        'ibd': bs_raw_rows.get('IBD(이자부부채)') or _find_row(bs_raw_rows, bs_names, ['단기차입금']),
+    }
+    is_row = {
+        'revenue': _find_row(is_raw_rows, is_names, ['매출액']) or is_raw_rows.get('매출액'),
+        'cogs': _find_row(is_raw_rows, is_names, ['매출원가']) or is_raw_rows.get('매출원가'),
+        'sga': _find_row(is_raw_rows, is_names, ['판매비와관리비']) or is_raw_rows.get('판매비와관리비'),
+    }
+    cs_row = {
+        'da': _find_row(cs_raw_rows, cs_names, ['감가상각비']) or cs_raw_rows.get('D&A'),
+    }
 
     # ════════════════════════════════════════════════════════════════
     # 2. Revenue

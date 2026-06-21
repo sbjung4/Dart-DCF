@@ -510,6 +510,31 @@ def _extract_financials_from_items(items):
     capex_raw = _lookup_account(cf_map, ACCOUNT_MAP['capex'])
     capex = abs(capex_raw)  # CapEx is typically negative in CF
 
+    def _raw_rows(raw_items):
+        """엑셀 원본 재무제표 시트용 — DART 보고서에 표시되는 줄 순서(ord)
+        그대로, 계정명/금액만 추출한다 (가공/요약 없이 raw 그대로)."""
+        seen = set()
+        rows = []
+        for it in raw_items:
+            name = it.get('account_nm', '')
+            if not name:
+                continue
+            try:
+                ordv = int(it.get('ord', 0) or 0)
+            except (TypeError, ValueError):
+                ordv = 0
+            key = (it.get('account_id', ''), name, ordv)
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append({
+                'account_nm': name,
+                'amount': _safe_amount(it.get('thstrm_amount', '0')),
+                'ord': ordv,
+            })
+        rows.sort(key=lambda r: r['ord'])
+        return rows
+
     return {
         'income_statement': {
             'revenue': revenue,
@@ -551,7 +576,12 @@ def _extract_financials_from_items(items):
             'da': da_cf if da_cf > 0 else da,
             'dividends_paid': dividends_paid,
             '_da_debug_items': da_debug_items,
-        }
+        },
+        'raw': {
+            'bs': _raw_rows(bs_items),
+            'is': _raw_rows(is_items),
+            'cf': _raw_rows(cf_items),
+        },
     }
 
 
