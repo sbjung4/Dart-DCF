@@ -435,6 +435,18 @@ def _extract_financials_from_items(items):
         if da == 0:
             da = _sum_by_keyword(is_items, None, ['상각비', '개발비상각'], DA_EXCLUDE_KEYWORDS)
 
+    # D&A가 0일 경우 진단용으로 CF/IS 원본 계정명을 남겨, 어떤 계정명으로
+    # 들어오는지 화면에서 직접 확인할 수 있도록 한다 (account_id가 비표준이라
+    # 키워드 매칭에 실패하는 경우를 찾기 위함).
+    da_debug_items = None
+    if da == 0:
+        da_debug_items = [
+            {'sj_div': it.get('sj_div'), 'account_nm': it.get('account_nm'),
+             'thstrm_amount': it.get('thstrm_amount')}
+            for it in (cf_items + is_items)
+            if it.get('account_nm')
+        ]
+
     # Extract BS metrics
     total_assets = _lookup_account(bs_map, ACCOUNT_MAP['total_assets'])
     current_assets = _lookup_account(bs_map, ACCOUNT_MAP['current_assets'])
@@ -495,6 +507,7 @@ def _extract_financials_from_items(items):
             'financing_cf': financing_cf,
             'capex': capex,
             'da': da_cf if da_cf > 0 else da,
+            '_da_debug_items': da_debug_items,
         }
     }
 

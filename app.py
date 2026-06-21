@@ -112,7 +112,7 @@ def extract_historical_summary(financial_data: dict, years: list) -> dict:
     """
     summary = {
         'revenue': {}, 'cogs': {}, 'gross_profit': {}, 'sga': {},
-        'ebit': {}, 'net_income': {}, 'da': {}, 'capex': {},
+        'ebit': {}, 'net_income': {}, 'da': {}, 'da_debug': {}, 'capex': {},
         'total_assets': {}, 'total_debt': {}, 'total_equity': {}, 'cash': {},
         'operating_cf': {}, 'investing_cf': {}, 'nwc': {},
         # 운전자본 세부 항목 (DSO/DIO/DPO 계산용)
@@ -140,6 +140,7 @@ def extract_historical_summary(financial_data: dict, years: list) -> dict:
         summary['ebit'][yr] = is_data.get('ebit', 0)
         summary['net_income'][yr] = is_data.get('net_income', 0)
         summary['da'][yr] = cf_data.get('da', is_data.get('da', 0))
+        summary['da_debug'][yr] = cf_data.get('_da_debug_items')
         summary['capex'][yr] = cf_data.get('capex', 0)
         summary['total_assets'][yr] = bs_data.get('total_assets', 0)
         summary['total_debt'][yr] = bs_data.get('total_debt', 0)
@@ -780,6 +781,19 @@ elif page == 'DCF 가정 입력':
         }
     st.markdown("**과거 D&A / CapEx 실적**")
     st.dataframe(pd.DataFrame(da_capex_hist), use_container_width=True)
+
+    # D&A가 0으로 잡힌 연도가 있으면, DART가 실제로 내려준 CF/IS 계정명을
+    # 그대로 보여줘서 어떤 명칭으로 들어오는지 직접 확인할 수 있게 한다.
+    zero_da_years = [yr for yr in hist_years if hist['da'].get(yr, 0) == 0]
+    if zero_da_years:
+        with st.expander(f"⚠️ {', '.join(str(y) for y in zero_da_years)}년 D&A가 0으로 조회됨 — DART 원본 계정명 확인"):
+            for yr in zero_da_years:
+                debug_items = hist.get('da_debug', {}).get(yr)
+                st.markdown(f"**{yr}년**")
+                if not debug_items:
+                    st.caption("해당 연도의 현금흐름표/손익계산서 원본 항목 자체가 비어있습니다 (데이터 조회 실패 가능성).")
+                else:
+                    st.dataframe(pd.DataFrame(debug_items), use_container_width=True)
 
     st.markdown("---")
 
