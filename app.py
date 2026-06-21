@@ -38,6 +38,7 @@ from dart_api import (
     get_business_segments, get_corp_code_list
 )
 from dcf import DCFModel
+from excel_export import build_excel_workbook
 
 st.set_page_config(
     page_title="DART DCF 분석",
@@ -1387,18 +1388,14 @@ elif page == 'DCF 결과':
         st.subheader("📥 결과 내보내기")
 
         def create_excel_export():
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                (fcff_df / 1e8).to_excel(writer, sheet_name='FCFF 추정', float_format='%.1f')
-                pd.DataFrame({
-                    '항목': ['EV', '순차입금', '자기자본가치', '주당가치', 'WACC', 'TGR', 'TV PV'],
-                    '값': [ev/1e8, net_debt/1e8, eq_val/1e8, price_per_share or 0, wacc*100, tgr_c, pv_tv/1e8],
-                    '단위': ['억원','억원','억원','원','%','%','억원']
-                }).to_excel(writer, sheet_name='요약', index=False)
-                sens_df.to_excel(writer, sheet_name='민감도 분석')
-                hist_rows = {m: {str(k): v/1e8 for k,v in d.items()} for m,d in hist.items() if isinstance(d, dict)}
-                pd.DataFrame(hist_rows).T.to_excel(writer, sheet_name='역사적 데이터', float_format='%.1f')
-            return output.getvalue()
+            return build_excel_workbook(
+                company_name=company_name,
+                hist=hist, asmp=asmp,
+                fcff_df=fcff_df, pv_fcff_df=pv_fcff_df,
+                wacc=wacc, tgr=tgr_c, pv_tv=pv_tv, ev=ev,
+                net_debt=net_debt, eq_val=eq_val, shares=shares,
+                price_per_share=price_per_share, base_year=base_year,
+            )
 
         company_name = st.session_state.selected_company['corp_name'] if st.session_state.selected_company else 'company'
         st.download_button(
