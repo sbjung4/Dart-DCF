@@ -292,20 +292,25 @@ KOREAN_NAME_KEYWORDS = {
     'admin_expense': ['관리비'],
     'da': ['감가상각비와무형자산상각비', '감가상각비및무형자산상각비'],
     'da_ppe': ['유형자산상각비', '감가상각비'],
-    'da_intangible': ['무형자산상각비'],
-    'da_rou': ['사용권자산상각비', '리스자산상각비'],
+    'da_intangible': ['무형자산상각비', '개발비상각'],
+    'da_rou': ['사용권자산상각비', '리스자산상각비', '사용권자산감가상각비'],
     'accounts_receivable': ['매출채권'],
     'inventory': ['재고자산'],
     'accounts_payable': ['매입채무'],
     'shares_outstanding': ['발행주식수', '유통주식수', '보통주식수'],
 }
 
+# 감가상각비/상각비와 무관하게 "상각"이라는 단어가 들어가는 회계/금융 계정
+# (사채할인발행차금상각, 상각후원가 등) — D&A 키워드 매칭 시 오염을 막기 위해 제외
+DA_EXCLUDE_KEYWORDS = ['사채', '차입금', '할인발행차금', '상각후원가', '리스부채이자']
+
+
 
 def _normalize_account_nm(name):
     return name.replace(' ', '').replace('\xa0', '').replace('　', '')
 
 
-def _lookup_account(account_map_by_id, category_keys, keywords=None):
+def _lookup_account(account_map_by_id, category_keys, keywords=None, exclude_keywords=None):
     """Look up account value by trying multiple possible account IDs first,
     then falling back to a Korean account_nm substring match if provided."""
     for key in category_keys:
@@ -318,6 +323,8 @@ def _lookup_account(account_map_by_id, category_keys, keywords=None):
             if not isinstance(name, str):
                 continue
             norm = _normalize_account_nm(name)
+            if exclude_keywords and any(kw in norm for kw in exclude_keywords):
+                continue
             if any(kw in norm for kw in keywords):
                 val = _safe_amount(raw_val)
                 if val != 0:
@@ -392,7 +399,6 @@ def _extract_financials_from_items(items):
     pretax_income = _lookup_account(is_map, ACCOUNT_MAP['pretax_income'])
     tax_expense = _lookup_account(is_map, ACCOUNT_MAP['tax_expense'])
     net_income = _lookup_account(is_map, ACCOUNT_MAP['net_income'])
-    da_is = _lookup_account(is_map, ACCOUNT_MAP['da'], KOREAN_NAME_KEYWORDS['da'])
 
     # SGA breakdown from IS
     selling_expense = _lookup_account(is_map, ACCOUNT_MAP['selling_expense'], KOREAN_NAME_KEYWORDS['selling_expense'])
@@ -401,18 +407,23 @@ def _extract_financials_from_items(items):
     if sga == 0 and (selling_expense + admin_expense) > 0:
         sga = selling_expense + admin_expense
 
-    # Try to find D&A in CF (often listed as adjustment item)
-    da_cf = _lookup_account(cf_map, ACCOUNT_MAP['da'], KOREAN_NAME_KEYWORDS['da'])
-
-    # Try individual D&A components from CF statement
-    da_ppe = _lookup_account(cf_map, ACCOUNT_MAP['da_ppe'], KOREAN_NAME_KEYWORDS['da_ppe'])
-    da_intangible = _lookup_account(cf_map, ACCOUNT_MAP['da_intangible'], KOREAN_NAME_KEYWORDS['da_intangible'])
-    da_rou = _lookup_account(cf_map, ACCOUNT_MAP['da_rou'], KOREAN_NAME_KEYWORDS['da_rou'])
+    # D&A는 현금흐름표의 "영업활동현금흐름 - 현금의 유출이 없는 비용 등의 가산"
+    # 항목에서 가져오는 것이 가장 정확함. 유형자산감가상각비, 개발비상각,
+    # 기타무형자산상각비, 사용권자산상각비를 모두 더해서 구한다.
+    da_ppe = _lookup_account(cf_map, ACCOUNT_MAP['da_ppe'], KOREAN_NAME_KEYWORDS['da_ppe'], DA_EXCLUDE_KEYWORDS)
+    da_intangible = _lookup_account(cf_map, ACCOUNT_MAP['da_intangible'], KOREAN_NAME_KEYWORDS['da_intangible'], DA_EXCLUDE_KEYWORDS)
+    da_rou = _lookup_account(cf_map, ACCOUNT_MAP['da_rou'], KOREAN_NAME_KEYWORDS['da_rou'], DA_EXCLUDE_KEYWORDS)
     da_components = da_ppe + da_intangible + da_rou
 
-    # Best estimate: components sum > combined CF > IS > sum of all
-    # "상각비" line items found anywhere in CF/IS (catches notes that break
-    # D&A into several non-standard line items with no XBRL account_id)
+    # 결합형 계정("감가상각비와무형자산상각비" 등 하나로 합쳐진 계정)도 시도
+    da_cf = _lookup_account(cf_map, ACCOUNT_MAP['da'], KOREAN_NAME_KEYWORDS['da'], DA_EXCLUDE_KEYWORDS)
+
+    # 손익계산서 측 D&A (제조원가/판관비 내 감가상각비 주석 등에서 잡힐 수 있음)
+    da_is = _lookup_account(is_map, ACCOUNT_MAP['da'], KOREAN_NAME_KEYWORDS['da'], DA_EXCLUDE_KEYWORDS)
+
+    # 우선순위: CF 개별 구성요소 합 > CF 결합계정 > IS > CF/IS 전체에서
+    # "상각비"/"상각"이 포함된 모든 항목을 합산하는 최종 폴백 (사채 관련
+    # 상각 계정은 DA_EXCLUDE_KEYWORDS로 제외)
     if da_components > 0:
         da = da_components
     elif da_cf > 0:
@@ -420,9 +431,9 @@ def _extract_financials_from_items(items):
     elif da_is > 0:
         da = da_is
     else:
-        da = _sum_by_keyword(cf_items, None, ['상각비'])
+        da = _sum_by_keyword(cf_items, None, ['상각비', '개발비상각'], DA_EXCLUDE_KEYWORDS)
         if da == 0:
-            da = _sum_by_keyword(is_items, None, ['상각비'])
+            da = _sum_by_keyword(is_items, None, ['상각비', '개발비상각'], DA_EXCLUDE_KEYWORDS)
 
     # Extract BS metrics
     total_assets = _lookup_account(bs_map, ACCOUNT_MAP['total_assets'])
