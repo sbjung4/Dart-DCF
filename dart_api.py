@@ -312,11 +312,22 @@ KOREAN_NAME_KEYWORDS = {
     'shares_outstanding': ['발행주식수', '유통주식수', '보통주식수'],
     'interest_expense': ['이자비용', '금융원가', '금융비용'],
     'dividends_paid': ['배당금의지급', '배당금지급'],
+    # 순차입금(IBD-Cash) 계산용
+    'ibd': ['단기차입금', '유동성장기부채', '유동성장기차입금', '장기차입금',
+            '리스부채', '금융리스부채', '전환사채', '신주인수권부사채', '교환사채', '사채'],
+    'cash_equivalents': ['현금및현금성자산', '단기금융상품', '단기예금'],
 }
 
 # 감가상각비/상각비와 무관하게 "상각"이라는 단어가 들어가는 회계/금융 계정
 # (사채할인발행차금상각, 상각후원가 등) — D&A 키워드 매칭 시 오염을 막기 위해 제외
 DA_EXCLUDE_KEYWORDS = ['사채', '차입금', '할인발행차금', '상각후원가', '리스부채이자']
+
+# 순차입금(IBD) 합산 시 사채/차입금의 contra계정(할인발행차금, 전환권조정 등)이나
+# 이자/평가손익 계정이 오매칭되는 것을 막기 위한 제외 키워드
+IBD_EXCLUDE_KEYWORDS = ['할인발행차금', '전환권조정', '신주인수권조정', '상각후원가측정',
+                        '이자', '평가손익', '리스채권']
+# 장기금융상품(비유동)이 단기 현금성자산에 섞이지 않도록 제외
+CASH_EQUIV_EXCLUDE_KEYWORDS = ['장기']
 
 
 
@@ -482,6 +493,16 @@ def _extract_financials_from_items(items):
         long_term = _lookup_account(bs_map, ACCOUNT_MAP['long_term_borrowings'])
         total_debt = short_term + long_term
 
+    # 순차입금(Net Debt) = IBD(이자부부채) - 현금성자산
+    # IBD: 단기차입금, 유동성장기부채, 장기차입금, 금융리스부채, 전환사채(CB),
+    #      교환사채(EB), 신주인수권부사채(BW), 일반 사채 등을 모두 합산 (서로
+    #      다른 계정이 동시에 존재할 수 있으므로 _sum_by_keyword로 전부 더함)
+    ibd = _sum_by_keyword(bs_items, 'BS', KOREAN_NAME_KEYWORDS['ibd'], IBD_EXCLUDE_KEYWORDS)
+    # 현금성자산: 현금및현금성자산 + 단기금융상품(단기예금 등)
+    cash_equivalents = _sum_by_keyword(bs_items, 'BS', KOREAN_NAME_KEYWORDS['cash_equivalents'], CASH_EQUIV_EXCLUDE_KEYWORDS)
+    if cash_equivalents == 0:
+        cash_equivalents = cash
+
     # Extract CF metrics
     operating_cf = _lookup_account(cf_map, ACCOUNT_MAP['operating_cf'])
     investing_cf = _lookup_account(cf_map, ACCOUNT_MAP['investing_cf'])
@@ -514,6 +535,9 @@ def _extract_financials_from_items(items):
             'cash': cash,
             'total_equity': total_equity,
             'total_debt': total_debt,
+            'ibd': ibd,
+            'cash_equivalents': cash_equivalents,
+            'net_debt': ibd - cash_equivalents,
             'accounts_receivable': accounts_receivable,
             'inventory': inventory,
             'accounts_payable': accounts_payable,

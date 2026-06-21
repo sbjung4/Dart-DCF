@@ -125,6 +125,8 @@ def extract_historical_summary(financial_data: dict, years: list) -> dict:
         'shares_outstanding': {},
         # 차입금/이자/배당
         'interest_expense': {}, 'dividends_paid': {}, 'implied_interest_rate': {},
+        # 순차입금 (IBD - 현금성자산)
+        'ibd': {}, 'cash_equivalents': {}, 'net_debt': {},
     }
     for yr in years:
         yr_data = financial_data.get(str(yr), {})
@@ -183,6 +185,14 @@ def extract_historical_summary(financial_data: dict, years: list) -> dict:
         summary['interest_expense'][yr] = interest_exp
         summary['dividends_paid'][yr] = cf_data.get('dividends_paid', 0)
         summary['implied_interest_rate'][yr] = safe_div(interest_exp, total_debt_yr, 0) * 100 if total_debt_yr > 0 else 0
+
+        # 순차입금 = IBD(단기차입금+유동성장기부채+장기차입금+리스부채+CB/EB/BW/사채 등)
+        # - 현금성자산(현금및현금성자산+단기금융상품)
+        ibd_yr = bs_data.get('ibd', 0)
+        cash_eq_yr = bs_data.get('cash_equivalents', 0)
+        summary['ibd'][yr] = ibd_yr
+        summary['cash_equivalents'][yr] = cash_eq_yr
+        summary['net_debt'][yr] = bs_data.get('net_debt', ibd_yr - cash_eq_yr)
 
     return summary
 
@@ -1188,9 +1198,10 @@ elif page == 'DCF 가정 입력':
                                                        step=1000.0,
                                                        help="총 발행주식수 입력 시 주당가치 자동 계산")
     with col2:
-        net_debt_auto = hist['total_debt'].get(base_year, 0) - hist['cash'].get(base_year, 0)
-        st.metric("자동 산출 순차입금", f"{fmt_억(net_debt_auto)}억원",
-                  help="EV - 순차입금 = 자기자본가치")
+        net_debt_auto = hist['net_debt'].get(base_year, 0)
+        st.metric("자동 산출 순차입금 (IBD-현금성자산)", f"{fmt_억(net_debt_auto)}억원",
+                  help=f"기준연도({base_year}) IBD(단기차입금/유동성장기부채/장기차입금/리스부채/CB·EB·BW/사채 등) "
+                       "- 현금성자산(현금및현금성자산+단기금융상품). EV - 순차입금 = 자기자본가치")
 
     st.session_state.dcf_assumptions = asmp
     st.divider()
@@ -1223,6 +1234,9 @@ elif page == 'DCF 결과':
         'cash': hist['cash'].get(base_year, 0),
         'total_assets': hist['total_assets'].get(base_year, 0),
         'shares_outstanding': asmp.get('shares_outstanding', 0),
+        'ibd': hist['ibd'].get(base_year, 0),
+        'cash_equivalents': hist['cash_equivalents'].get(base_year, 0),
+        'net_debt': hist['net_debt'].get(base_year, 0),
     }
 
     try:
@@ -1252,7 +1266,9 @@ elif page == 'DCF 결과':
             model_asmp['nwc_method'] = 'pct_revenue'
 
         model_asmp['tgr'] = model_asmp.pop('terminal_growth_rate', 0.015)
-        model_asmp['net_debt'] = hist_data['total_debt'] - hist_data['cash']
+        # 순차입금 = IBD(단기차입금/유동성장기부채/장기차입금/리스부채/CB·EB·BW/사채 등)
+        # - 현금성자산(현금및현금성자산+단기금융상품), 기준연도(base_year) 기준
+        model_asmp['net_debt'] = hist_data['net_debt']
 
         with st.spinner("DCF 계산 중..."):
             model = DCFModel(hist_data, model_asmp)
@@ -1284,7 +1300,7 @@ elif page == 'DCF 결과':
             total_pv_fcff = float(pv_fcff_df['pv_fcff'].sum())
             ev = total_pv_fcff + pv_tv
 
-        net_debt = hist_data['total_debt'] - hist_data['cash']
+        net_debt = hist_data['net_debt']
         eq_val = model.equity_value(ev)
         shares = hist_data['shares_outstanding']
         price_per_share = model.price_per_share(eq_val, shares) if shares > 0 else None

@@ -254,6 +254,7 @@ def build_excel_workbook(company_name, hist, asmp, fcff_df, pv_fcff_df,
     bs_row = hist_sheet("BS", [
         ("총자산", "total_assets"), ("유동자산", "current_assets"), ("유동부채", "current_liabilities"),
         ("현금", "cash"), ("총차입금", "total_debt"), ("총자본", "total_equity"),
+        ("IBD(이자부부채)", "ibd"), ("현금성자산(IBD대응)", "cash_equivalents"), ("순차입금(IBD-현금성자산)", "net_debt"),
         ("매출채권", "accounts_receivable"), ("재고자산", "inventory"), ("매입채무", "accounts_payable"),
         ("발행주식수", "shares_outstanding"),
     ])
@@ -425,7 +426,7 @@ def build_excel_workbook(company_name, hist, asmp, fcff_df, pv_fcff_df,
     base_debt_col = get_column_letter(3 + len(hist_years) - 1)
     for i in range(n):
         col = get_column_letter(3 + i)
-        prev = f"BS!{base_debt_col}{bs_row['total_debt']}" if i == 0 else f"{get_column_letter(3+i-1)}7"
+        prev = f"BS!{base_debt_col}{bs_row['ibd']}" if i == 0 else f"{get_column_letter(3+i-1)}7"
         ws_debt.cell(row=6, column=3 + i, value=f"={prev}").number_format = NUM_FMT
     _label(ws_debt, 7, 2, "기말 차입금", bold=True)
     for i in range(n):
@@ -476,7 +477,7 @@ def build_excel_workbook(company_name, hist, asmp, fcff_df, pv_fcff_df,
     _label(ws_w, 10, 2, "최종 Ke", bold=True)
     ws_w.cell(row=10, column=3, value="=IF(C9>0,C9,C8)").number_format = PCT_FMT
     _label(ws_w, 12, 2, "총차입금")
-    ws_w.cell(row=12, column=3, value=f"=BS!{base_debt_col}{bs_row['total_debt']}").number_format = NUM_FMT
+    ws_w.cell(row=12, column=3, value=f"=BS!{base_debt_col}{bs_row['ibd']}").number_format = NUM_FMT
     _label(ws_w, 13, 2, "총자본")
     ws_w.cell(row=13, column=3, value=f"=BS!{base_debt_col}{bs_row['total_equity']}").number_format = NUM_FMT
     _label(ws_w, 14, 2, "타인자본비중 직접입력(%, 0=BS기준)")
