@@ -257,18 +257,47 @@ def build_excel_workbook(company_name, hist, asmp, fcff_df, pv_fcff_df,
 
     def _merged_raw_rows(stmt_key):
         """여러 연도의 DART 원본 항목을 계정명 기준으로 합치고, 각 계정이
-        보고서에 나타나는 순서(ord)를 기준으로 정렬한다 (가공/요약 없음)."""
+        보고서에 나타나는 순서(ord)를 기준으로 정렬한다 (가공/요약 없음).
+
+        병합 키: account_id가 있으면 (account_id 우선)을 키로 쓰고, 없거나
+        연도별로 account_id가 비표준/누락인 경우 공백을 제거한 정규화된
+        계정명(account_nm_norm)으로 fallback한다. account_id만 단독 키로
+        쓰면 DART가 계정명 표기를 살짝 바꾼 해 사이에도 잘 합쳐지고,
+        반대로 계정명만 쓰면 단순 공백/개행 차이로 같은 계정이 다른 행으로
+        쪼개지는 문제(다트에서 받은 그대로인데 "이상하게" 보이는 원인 중
+        하나)를 막을 수 있다. 화면에 표시되는 라벨은 가장 처음 등장한
+        연도의 원본 account_nm(정규화 전)을 그대로 사용한다.
+        """
         order_of = {}
         vals = {}
+        display_name = {}
         for yr in hist_years:
             rows = financial_data.get(str(yr), {}).get('raw', {}).get(stmt_key, [])
             for r in rows:
-                name = r['account_nm']
-                vals.setdefault(name, {})[yr] = r['amount']
-                if name not in order_of or r['ord'] < order_of[name]:
-                    order_of[name] = r['ord']
-        names_sorted = sorted(vals.keys(), key=lambda nm: order_of.get(nm, 0))
-        return names_sorted, vals
+                account_id = r.get('account_id') or ''
+                norm_name = r.get('account_nm_norm') or r['account_nm'].replace(' ', '').strip()
+                key = account_id if account_id else f"__name__:{norm_name}"
+                vals.setdefault(key, {})[yr] = r['amount']
+                if key not in display_name:
+                    display_name[key] = r['account_nm']
+                if key not in order_of or r['ord'] < order_of[key]:
+                    order_of[key] = r['ord']
+        keys_sorted = sorted(vals.keys(), key=lambda k: order_of.get(k, 0))
+        # 반환값은 기존 인터페이스(이름->값/행번호)를 유지하기 위해 표시용
+        # 이름을 키로 다시 매핑한다. 표시 이름이 같은 계정이 서로 다른
+        # account_id로 두 번 잡히는 극히 드문 경우를 피하려고, 표시 이름이
+        # 충돌하면 두 번째 항목에 계정ID를 덧붙여 구분한다.
+        names_sorted = []
+        vals_by_name = {}
+        seen_names = set()
+        for key in keys_sorted:
+            name = display_name[key]
+            if name in seen_names:
+                name = f"{name} ({key})"
+            seen_names.add(name)
+            names_sorted.append(name)
+            vals_by_name[name] = vals[key]
+        return names_sorted, vals_by_name
 
     TITLES = {"BS": "재 무 상 태 표", "IS": "손 익 계 산 서", "CS": "현 금 흐 름 표"}
 

@@ -512,23 +512,36 @@ def _extract_financials_from_items(items):
 
     def _raw_rows(raw_items):
         """엑셀 원본 재무제표 시트용 — DART 보고서에 표시되는 줄 순서(ord)
-        그대로, 계정명/금액만 추출한다 (가공/요약 없이 raw 그대로)."""
+        그대로, 계정명/금액만 추출한다 (가공/요약 없이 raw 그대로).
+
+        주의: DART의 'ord' 필드는 문자열이며 동일 sj_div(BS/IS/CIS/CF) +
+        동일 fs_div 내에서만 의미가 있는 상대 순서값이다. 파싱에 실패하는
+        경우(빈 값/비숫자) 전부 0으로 깔아버리면 원본 리스트 순서가
+        뒤섞여 버리므로, 실패 시에는 원본 리스트에서의 위치(인덱스)를
+        안정적인 폴백으로 사용해 최소한 DART가 보낸 원래 순서를 보존한다.
+        """
         seen = set()
         rows = []
-        for it in raw_items:
+        for idx, it in enumerate(raw_items):
             name = it.get('account_nm', '')
             if not name:
                 continue
+            norm_name = _normalize_account_nm(name).strip() or name.strip()
             try:
-                ordv = int(it.get('ord', 0) or 0)
+                ordv = int(str(it.get('ord', '')).strip())
             except (TypeError, ValueError):
-                ordv = 0
-            key = (it.get('account_id', ''), name, ordv)
+                # ord를 파싱할 수 없으면 원본 리스트상의 위치를 폴백으로 사용
+                # (0으로 통일하면 여러 항목이 맨 앞으로 몰려 순서가 깨짐).
+                ordv = idx
+            account_id = it.get('account_id', '') or ''
+            key = (account_id, norm_name, ordv)
             if key in seen:
                 continue
             seen.add(key)
             rows.append({
                 'account_nm': name,
+                'account_nm_norm': norm_name,
+                'account_id': account_id,
                 'amount': _safe_amount(it.get('thstrm_amount', '0')),
                 'ord': ordv,
             })
@@ -585,7 +598,7 @@ def _extract_financials_from_items(items):
     }
 
 
-def get_financial_statements(corp_code, year, api_key, report_type='11011', fs_div='CFS'):
+def get_financial_statements(corp_code, year, api_key, report_type='11011', fs_div='OFS'):
     """
     Fetch financial statements from DART API.
     report_type: 11011=사업보고서, 11012=반기보고서, 11013=1분기, 11014=3분기
@@ -595,6 +608,15 @@ def get_financial_statements(corp_code, year, api_key, report_type='11011', fs_d
     데이터를 제공합니다. 감사보고서만 제출하는 비상장 외부감사대상 법인의 경우,
     같은 연도에 다른 보고서 종류로 데이터가 잡힐 수도 있으므로 요청한
     report_type이 비어있으면 다른 report_type도 순차적으로 시도합니다.
+
+    fs_div 우선순위: 여러 연도를 모아 BS/IS/CS 원본 시트를 만들 때, 연도별로
+    CFS(연결)/OFS(개별)가 섞이면 같은 계정명이라도 금액 기준(자회사 포함
+    여부)이 달라져 시트가 "이상하게" 보인다. 따라서 호출자가 명시적으로
+    요청한 fs_div를 최우선으로 시도하되, 그것이 없을 때만 다른 구분으로
+    넘어가도록 순서를 고정한다 — 모든 연도 호출에서 동일한 우선순위
+    (요청값 -> 대안값)를 적용해야 연도 간 일관성이 유지된다. 기본값은
+    'OFS'(개별/별도) — 참고 양식("해농_BS/IS/CS")이 단일 회사 별도재무제표
+    기준이었기 때문.
     """
     key = get_dart_api_key(api_key)
     url = f"{BASE_URL}/fnlttSinglAcntAll.json"
@@ -613,9 +635,16 @@ def get_financial_statements(corp_code, year, api_key, report_type='11011', fs_d
 
     tried = []
     report_candidates = [report_type] + [r for r in ('11011', '11014', '11012', '11013') if r != report_type]
+    # fs_div 우선순위는 report_type 후보와 무관하게 고정한다: 요청된 fs_div를
+    # 먼저 모든 report_type에 대해 시도하고, 그래도 못 찾으면 대안 fs_div로
+    # 전체를 다시 시도한다. (이전에는 report_type마다 매번 fs_div 순서를
+    # 새로 돌았기 때문에, 연도별로 우연히 다른 fs_div가 채택되어 raw 시트에
+    # CFS/OFS가 섞이는 문제가 있었다 — 우선순위 자체는 고정되어 있었지만
+    # report_type 루프 안쪽에 있어 실질적으로 연도마다 결과가 달라졌다.)
+    fs_div_candidates = [fs_div, 'OFS' if fs_div == 'CFS' else 'CFS']
     data = None
-    for rprt_code in report_candidates:
-        for div in (fs_div, 'OFS' if fs_div == 'CFS' else 'CFS'):
+    for div in fs_div_candidates:
+        for rprt_code in report_candidates:
             data = _fetch(rprt_code, div)
             tried.append((rprt_code, div, data.get('status')))
             if data.get('status') == '000' and data.get('list'):
