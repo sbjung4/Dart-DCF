@@ -23,23 +23,38 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
-HEADER_FILL = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
-SUBHEADER_FILL = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
-INPUT_FILL = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+# 참고 양식의 실제 스타일 카탈로그(테마 색상 theme=3 navy 계열)를 RGB로
+# 근사한 값들. theme=3,tint=0.0 은 진한 네이비 헤더, tint=0.0999 는 약간
+# 밝은 네이비(서브헤더 띠), tint=0.2499 는 중간 톤(강조 라벨 띠),
+# tint=0.8999 는 거의 흰색에 가까운 옅은 네이비(소계/하이라이트 행).
+NAVY = "1F3864"
+HEADER_FILL = PatternFill(start_color=NAVY, end_color=NAVY, fill_type="solid")            # theme3 tint0.0
+SUBHEADER_FILL = PatternFill(start_color="2E5395", end_color="2E5395", fill_type="solid")  # theme3 tint0.0999
+ACCENT_FILL = PatternFill(start_color="4472A8", end_color="4472A8", fill_type="solid")     # theme3 tint0.2499
+LIGHT_NAVY_FILL = PatternFill(start_color="DCE6F1", end_color="DCE6F1", fill_type="solid")  # theme3 tint0.8999 (소계행)
+LIGHT_GRAY_FILL = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")   # theme0 tint-0.0499
+INPUT_FILL = PatternFill(start_color="FFFFCC", end_color="FFFFCC", fill_type="solid")
+RED_INPUT_FILL = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
 GRAY_FILL = PatternFill(start_color="DCDCDC", end_color="DCDCDC", fill_type="solid")
-HEADER_FONT = Font(color="FFFFFF", bold=True, size=11)
-BOLD = Font(bold=True)
+HEADER_FONT = Font(name="맑은 고딕", color="FFFFFF", bold=True, size=10)
+SUBHEADER_FONT = Font(name="맑은 고딕", color="FFFFFF", bold=False, size=10)
+BOLD = Font(name="맑은 고딕", bold=True, size=10)
+ITALIC_GRAY = Font(name="맑은 고딕", italic=True, color="808080", size=10)
+NORMAL = Font(name="맑은 고딕", size=10)
+RED_BOLD = Font(name="맑은 고딕", bold=True, color="FF0000", size=10)
 THIN = Side(style="thin", color="BFBFBF")
 THIN_DARK = Side(style="thin", color="808080")
 THICK = Side(style="thin", color="000000")
 BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 ROW_BORDER = Border(left=THIN_DARK, right=THIN_DARK, top=THIN_DARK, bottom=THIN_DARK)
 TOTAL_BORDER = Border(left=THIN_DARK, right=THIN_DARK, top=THIN_DARK, bottom=THICK)
+SECTION_BORDER = Border(left=THIN_DARK, right=THIN_DARK, top=THIN_DARK, bottom=THIN_DARK)
 NUM_FMT = '#,##0.0'
 PCT_FMT = '0.0%'
 ACC_FMT = '#,##0_);(#,##0);-_) '
 ACTUAL_FMT = '#"A"'
 ESTIMATE_FMT = '#"E"'
+INTERIM_LABEL_FMT = 'General'  # 예: '2025.1H' 같은 반기 실적 텍스트 열
 SUBTOTAL_MARKS = ('Ⅰ', 'Ⅱ', 'Ⅲ', 'Ⅳ', 'Ⅴ', 'Ⅵ', 'Ⅶ', 'Ⅷ', 'Ⅸ', 'Ⅹ')
 SUBTOTAL_SUFFIXES = ('총계', '총액')
 SUBTOTAL_KEYWORDS = ('순이익', '순손실', '영업이익', '영업손실')
@@ -56,11 +71,42 @@ def _is_subtotal_label(name):
 
 
 def _title(ws, text, row=2, col=2, span=8):
+    """참고 양식 Row2 '(단위: 백만원)' 헤더 띠 — 진한 네이비 배경, 흰 굵은 글씨."""
     cell = ws.cell(row=row, column=col, value=text)
     cell.font = HEADER_FONT
     cell.fill = HEADER_FILL
     for c in range(col, col + span):
-        ws.cell(row=row, column=c).fill = HEADER_FILL
+        c_ = ws.cell(row=row, column=c)
+        c_.fill = HEADER_FILL
+        if c_.value is None:
+            c_.font = HEADER_FONT
+
+
+def _sheet_header_band(ws, label, col0, n_hist, n_proj, interim_label=None):
+    """참고 양식 공통 패턴: Row2 = '(단위: 백만원)' + 연도 헤더(A/E 표기),
+    Row4 = 시트 제목 띠(살짝 밝은 네이비). col0부터 과거(historical) n_hist개
+    열 + (선택)interim 1개 열 + 추정(projection) n_proj개 열을 배치한다.
+    반환값: {'hist_col0':.., 'interim_col':.., 'proj_col0':..}
+    """
+    unit = ws.cell(row=2, column=2, value="(단위: 백만원)")
+    unit.font = HEADER_FONT
+    unit.fill = HEADER_FILL
+    for c in range(2, col0):
+        cc = ws.cell(row=2, column=c)
+        cc.fill = HEADER_FILL
+        if cc.value is None:
+            cc.font = HEADER_FONT
+
+    title = ws.cell(row=4, column=2, value=label)
+    title.font = BOLD
+    title.fill = SUBHEADER_FILL
+    for c in range(2, col0):
+        cc = ws.cell(row=4, column=c)
+        cc.fill = SUBHEADER_FILL
+        if cc.value is None:
+            cc.font = SUBHEADER_FONT
+    return {'hist_col0': col0, 'interim_col': col0 + n_hist if interim_label else None,
+            'proj_col0': col0 + n_hist + (1 if interim_label else 0)}
 
 
 def _year_header(ws, row, col0, years, fill=SUBHEADER_FILL):
@@ -72,10 +118,46 @@ def _year_header(ws, row, col0, years, fill=SUBHEADER_FILL):
         cell.border = BORDER
 
 
+def _full_year_header(ws, row, col0, hist_years, proj_years, interim_label=None):
+    """과거(Actual, '#"A"') + (선택)반기 interim 텍스트열 + 추정(Estimate, '#"E"')
+    연도 헤더를 한 줄에 그린다. 참고 양식 DCF/Revenue/... Row2 패턴과 동일.
+    반환값: (hist_col0, interim_col_or_None, proj_col0)
+    """
+    col = col0
+    hist_col0 = col
+    for i, yr in enumerate(hist_years):
+        c = ws.cell(row=row, column=col, value=yr)
+        c.font = HEADER_FONT
+        c.fill = HEADER_FILL
+        c.number_format = ACTUAL_FMT
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        col += 1
+    interim_col = None
+    if interim_label is not None:
+        interim_col = col
+        c = ws.cell(row=row, column=col, value=interim_label)
+        c.font = HEADER_FONT
+        c.fill = HEADER_FILL
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        col += 1
+    proj_col0 = col
+    for i, yr in enumerate(proj_years):
+        if i == 0:
+            c = ws.cell(row=row, column=col, value=yr)
+        else:
+            prev = get_column_letter(col - 1)
+            c = ws.cell(row=row, column=col, value=f"=+{prev}{row}+1")
+        c.font = HEADER_FONT
+        c.fill = HEADER_FILL
+        c.number_format = ESTIMATE_FMT
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        col += 1
+    return hist_col0, interim_col, proj_col0
+
+
 def _label(ws, row, col, text, bold=False):
     cell = ws.cell(row=row, column=col, value=text)
-    if bold:
-        cell.font = BOLD
+    cell.font = BOLD if bold else NORMAL
     return cell
 
 
@@ -92,6 +174,13 @@ def _col_widths(ws, ncols, width=14, start=2):
         ws.column_dimensions[get_column_letter(c)].width = width
 
 
+def _apply_sheet_chrome(ws, ncols_label=2, last_data_col=None):
+    """참고 양식 공통: 그리드라인 숨김, A열 좁게(2.625), 라벨열 넓게."""
+    ws.sheet_view.showGridLines = False
+    ws.column_dimensions['A'].width = 2.625
+    ws.column_dimensions['B'].width = 30
+
+
 def build_excel_workbook(company_name, hist, asmp, fcff_df, pv_fcff_df,
                           wacc, tgr, pv_tv, ev, net_debt, eq_val, shares,
                           price_per_share, base_year, financial_data=None):
@@ -106,7 +195,10 @@ def build_excel_workbook(company_name, hist, asmp, fcff_df, pv_fcff_df,
     # 0. Control — 모든 가정 입력값이 모이는 시트
     # ════════════════════════════════════════════════════════════════
     ctrl = wb.create_sheet("Control")
+    _apply_sheet_chrome(ctrl)
     _title(ctrl, f"{company_name} — Control Panel (가정 입력)", span=2 + n)
+    # Control 시트는 참고 양식에서도 연도별 시계열이 아니라 가정값 입력
+    # 전용(point-in-time) 시트이므로 historical Actual 열을 추가하지 않는다.
     cr = {}  # control row registry
 
     r = 4
@@ -406,70 +498,112 @@ def build_excel_workbook(company_name, hist, asmp, fcff_df, pv_fcff_df,
         'da': _find_row(cs_raw_rows, cs_names, ['감가상각비']) or cs_raw_rows.get('D&A'),
     }
 
+    # ────────────────────────────────────────────────────────────────
+    # 과거(Actual)+추정(Estimate) 공통 열 배치: 과거 H개 열(3..3+H-1) 다음에
+    # 바로 추정 n개 열(3+H..3+H+n-1)이 이어진다. (참고 양식의 I~M=Actual,
+    # O~T=Estimate 패턴을 그대로 일반화 — 반기 interim N열은 우리는 반기
+    # 데이터가 없으므로 생략한다.)
+    # ────────────────────────────────────────────────────────────────
+    H = len(hist_years)
+    proj_col0 = 3 + H
+
+    def hist_col(i):
+        return get_column_letter(3 + i)
+
+    def proj_col(i):
+        return get_column_letter(proj_col0 + i)
+
+    def _style_header_row(ws, row=2):
+        _full_year_header(ws, row, 3, hist_years, proj_years)
+
+    def _hist_link_row(ws, row, sheet_name, src_row, sign="+", bold=False, fmt=NUM_FMT):
+        """과거 열에는 BS/IS/CS 시트의 해당 행을 그대로 수식으로 참조한다."""
+        for i in range(H):
+            c = ws.cell(row=row, column=3 + i,
+                        value=f"={sign}{sheet_name}!{hist_col(i)}{src_row}")
+            c.number_format = fmt
+            if bold:
+                c.font = BOLD
+
     # ════════════════════════════════════════════════════════════════
     # 2. Revenue
     # ════════════════════════════════════════════════════════════════
     ws_rev = wb.create_sheet("Revenue")
-    _title(ws_rev, "매출액 (단위: 백만원)", span=2 + n)
-    _label(ws_rev, 4, 2, "항목", bold=True)
-    _year_header(ws_rev, 4, 3, proj_years)
+    _apply_sheet_chrome(ws_rev)
+    _title(ws_rev, "매출액 (단위: 백만원)", span=2 + H + n)
+    _style_header_row(ws_rev)
+    _label(ws_rev, 4, 2, "매출액", bold=True)
 
-    base_rev_col = get_column_letter(3 + len(hist_years) - 1)
-    _label(ws_rev, 6, 2, "기준연도 매출액")
-    ws_rev.cell(row=6, column=3, value=f"=IS!{base_rev_col}{is_row['revenue']}").number_format = NUM_FMT
+    rev_row = 6
+    _label(ws_rev, rev_row, 2, "매출액", bold=True)
+    if is_row.get('revenue'):
+        _hist_link_row(ws_rev, rev_row, "IS", is_row['revenue'], bold=True)
 
     _label(ws_rev, 8, 2, "YoY 성장률(%)")
     for i in range(n):
-        ws_rev.cell(row=8, column=3 + i, value=f"={C(cr['rev_growth'], i)}").number_format = PCT_FMT
+        ws_rev.cell(row=8, column=proj_col0 + i, value=f"={C(cr['rev_growth'], i)}").number_format = PCT_FMT
 
     _label(ws_rev, 10, 2, "매출액(추정)", bold=True)
     for i in range(n):
-        col = get_column_letter(3 + i)
-        prev = "$C$6" if i == 0 else f"{get_column_letter(3+i-1)}10"
-        ws_rev.cell(row=10, column=3 + i, value=f"={prev}*(1+{col}8)").number_format = NUM_FMT
-        ws_rev.cell(row=10, column=3 + i).font = BOLD
-    _col_widths(ws_rev, n + 1)
+        col = proj_col(i)
+        prev = f"{hist_col(H-1)}{rev_row}" if i == 0 else f"{proj_col(i-1)}10"
+        ws_rev.cell(row=10, column=proj_col0 + i, value=f"={prev}*(1+{col}8)").number_format = NUM_FMT
+        ws_rev.cell(row=10, column=proj_col0 + i).font = BOLD
+    # rev_row(=6)이 과거 매출액, 10행이 추정 매출액 — DCF 등 다른 시트는
+    # 추정 구간만 필요하므로 rev_row 변수는 "추정" 행(10)을 가리키게 유지.
     rev_row = 10
+    _col_widths(ws_rev, H + n + 1)
 
     # ════════════════════════════════════════════════════════════════
     # 3. COGS
     # ════════════════════════════════════════════════════════════════
     ws_cogs = wb.create_sheet("COGS")
-    _title(ws_cogs, "매출원가 (단위: 백만원)", span=2 + n)
-    _year_header(ws_cogs, 4, 3, proj_years)
-    _label(ws_cogs, 6, 2, "매출원가/매출(%)" if cogs_method == 'pct_revenue' else "YoY 성장률(%)")
+    _apply_sheet_chrome(ws_cogs)
+    _title(ws_cogs, "매출원가 (단위: 백만원)", span=2 + H + n)
+    _style_header_row(ws_cogs)
+
+    _label(ws_cogs, 6, 2, "매출원가", bold=True)
+    if is_row.get('cogs'):
+        _hist_link_row(ws_cogs, 6, "IS", is_row['cogs'], bold=True)
+
+    _label(ws_cogs, 7, 2, "매출원가/매출(%)" if cogs_method == 'pct_revenue' else "YoY 성장률(%)")
     for i in range(n):
-        ws_cogs.cell(row=6, column=3 + i, value=f"={C(cr['cogs'], i)}").number_format = PCT_FMT
+        ws_cogs.cell(row=7, column=proj_col0 + i, value=f"={C(cr['cogs'], i)}").number_format = PCT_FMT
     _label(ws_cogs, 8, 2, "매출원가(추정)", bold=True)
-    base_col = get_column_letter(3 + len(hist_years) - 1)
     for i in range(n):
-        col = get_column_letter(3 + i)
+        col = proj_col(i)
         if cogs_method == 'pct_revenue':
-            ws_cogs.cell(row=8, column=3 + i, value=f"=Revenue!{col}{rev_row}*{col}6").number_format = NUM_FMT
+            ws_cogs.cell(row=8, column=proj_col0 + i, value=f"=Revenue!{col}{rev_row}*{col}7").number_format = NUM_FMT
         else:
-            prev = f"IS!{base_col}{is_row['cogs']}" if i == 0 else f"{get_column_letter(3+i-1)}8"
-            ws_cogs.cell(row=8, column=3 + i, value=f"={prev}*(1+{col}6)").number_format = NUM_FMT
-    _col_widths(ws_cogs, n + 1)
+            prev = f"IS!{hist_col(H-1)}{is_row['cogs']}" if i == 0 else f"{proj_col(i-1)}8"
+            ws_cogs.cell(row=8, column=proj_col0 + i, value=f"={prev}*(1+{col}7)").number_format = NUM_FMT
+    _col_widths(ws_cogs, H + n + 1)
     cogs_row_out = 8
 
     # ════════════════════════════════════════════════════════════════
     # 4. SG&A
     # ════════════════════════════════════════════════════════════════
     ws_sga = wb.create_sheet("SG&A")
-    _title(ws_sga, "판매비와관리비 (단위: 백만원)", span=2 + n)
-    _year_header(ws_sga, 4, 3, proj_years)
-    _label(ws_sga, 6, 2, "판관비/매출(%)" if sga_method == 'pct_revenue' else "YoY 성장률(%)")
+    _apply_sheet_chrome(ws_sga)
+    _title(ws_sga, "판매비와관리비 (단위: 백만원)", span=2 + H + n)
+    _style_header_row(ws_sga)
+
+    _label(ws_sga, 6, 2, "판매비와관리비", bold=True)
+    if is_row.get('sga'):
+        _hist_link_row(ws_sga, 6, "IS", is_row['sga'], bold=True)
+
+    _label(ws_sga, 7, 2, "판관비/매출(%)" if sga_method == 'pct_revenue' else "YoY 성장률(%)")
     for i in range(n):
-        ws_sga.cell(row=6, column=3 + i, value=f"={C(cr['sga'], i)}").number_format = PCT_FMT
+        ws_sga.cell(row=7, column=proj_col0 + i, value=f"={C(cr['sga'], i)}").number_format = PCT_FMT
     _label(ws_sga, 8, 2, "판관비(추정)", bold=True)
     for i in range(n):
-        col = get_column_letter(3 + i)
+        col = proj_col(i)
         if sga_method == 'pct_revenue':
-            ws_sga.cell(row=8, column=3 + i, value=f"=Revenue!{col}{rev_row}*{col}6").number_format = NUM_FMT
+            ws_sga.cell(row=8, column=proj_col0 + i, value=f"=Revenue!{col}{rev_row}*{col}7").number_format = NUM_FMT
         else:
-            prev = f"IS!{base_col}{is_row['sga']}" if i == 0 else f"{get_column_letter(3+i-1)}8"
-            ws_sga.cell(row=8, column=3 + i, value=f"={prev}*(1+{col}6)").number_format = NUM_FMT
-    _col_widths(ws_sga, n + 1)
+            prev = f"IS!{hist_col(H-1)}{is_row['sga']}" if i == 0 else f"{proj_col(i-1)}8"
+            ws_sga.cell(row=8, column=proj_col0 + i, value=f"={prev}*(1+{col}7)").number_format = NUM_FMT
+    _col_widths(ws_sga, H + n + 1)
     sga_row_out = 8
 
     # ════════════════════════════════════════════════════════════════
