@@ -610,118 +610,154 @@ def build_excel_workbook(company_name, hist, asmp, fcff_df, pv_fcff_df,
     # 5. D&A CAPEX
     # ════════════════════════════════════════════════════════════════
     ws_dc = wb.create_sheet("D&A CAPEX")
-    _title(ws_dc, "D&A · CapEx (단위: 백만원)", span=2 + n)
-    _year_header(ws_dc, 4, 3, proj_years)
+    _apply_sheet_chrome(ws_dc)
+    _title(ws_dc, "D&A · CapEx (단위: 백만원)", span=2 + H + n)
+    _style_header_row(ws_dc)
 
-    _label(ws_dc, 6, 2, f"D&A 가정값 ({da_method})")
+    _label(ws_dc, 6, 2, "D&A (과거, CS 감가상각비)", bold=True)
+    if cs_row.get('da'):
+        _hist_link_row(ws_dc, 6, "CS", cs_row['da'], bold=True)
+
+    _label(ws_dc, 7, 2, f"D&A 가정값 ({da_method})")
     for i in range(n):
-        ws_dc.cell(row=6, column=3 + i, value=f"={C(cr['da'], i)}").number_format = da_fmt
+        ws_dc.cell(row=7, column=proj_col0 + i, value=f"={C(cr['da'], i)}").number_format = da_fmt
     _label(ws_dc, 8, 2, "D&A(추정)", bold=True)
     for i in range(n):
-        col = get_column_letter(3 + i)
+        col = proj_col(i)
         if da_method == 'pct_revenue':
-            ws_dc.cell(row=8, column=3 + i, value=f"=Revenue!{col}{rev_row}*{col}6").number_format = NUM_FMT
+            ws_dc.cell(row=8, column=proj_col0 + i, value=f"=Revenue!{col}{rev_row}*{col}7").number_format = NUM_FMT
         elif da_method == 'fixed':
-            ws_dc.cell(row=8, column=3 + i, value=f"={col}6").number_format = NUM_FMT
+            ws_dc.cell(row=8, column=proj_col0 + i, value=f"={col}7").number_format = NUM_FMT
         else:
-            prev = f"CS!{base_col}{cs_row['da']}" if i == 0 else f"{get_column_letter(3+i-1)}8"
-            ws_dc.cell(row=8, column=3 + i, value=f"={prev}*(1+{col}6)").number_format = NUM_FMT
+            prev = f"CS!{hist_col(H-1)}{cs_row['da']}" if i == 0 else f"{proj_col(i-1)}8"
+            ws_dc.cell(row=8, column=proj_col0 + i, value=f"={prev}*(1+{col}7)").number_format = NUM_FMT
     da_row_out = 8
 
     _label(ws_dc, 11, 2, f"유지보수 CapEx 가정값 ({capex_method})")
     for i in range(n):
-        ws_dc.cell(row=11, column=3 + i, value=f"={C(cr['capex'], i)}").number_format = (
+        ws_dc.cell(row=11, column=proj_col0 + i, value=f"={C(cr['capex'], i)}").number_format = (
             PCT_FMT if capex_method == 'pct_revenue' else NUM_FMT)
     _label(ws_dc, 12, 2, "유지보수 CapEx", bold=True)
     for i in range(n):
-        col = get_column_letter(3 + i)
+        col = proj_col(i)
         if capex_method == 'equal_da':
-            ws_dc.cell(row=12, column=3 + i, value=f"={col}8").number_format = NUM_FMT
+            ws_dc.cell(row=12, column=proj_col0 + i, value=f"={col}8").number_format = NUM_FMT
         elif capex_method == 'pct_revenue':
-            ws_dc.cell(row=12, column=3 + i, value=f"=Revenue!{col}{rev_row}*{col}11").number_format = NUM_FMT
+            ws_dc.cell(row=12, column=proj_col0 + i, value=f"=Revenue!{col}{rev_row}*{col}11").number_format = NUM_FMT
         else:
-            ws_dc.cell(row=12, column=3 + i, value=f"={col}11").number_format = NUM_FMT
+            ws_dc.cell(row=12, column=proj_col0 + i, value=f"={col}11").number_format = NUM_FMT
 
     _label(ws_dc, 14, 2, "신규투자 CapEx")
     for i in range(n):
-        ws_dc.cell(row=14, column=3 + i, value=f"={C(cr['new_invest'], i)}").number_format = NUM_FMT
+        ws_dc.cell(row=14, column=proj_col0 + i, value=f"={C(cr['new_invest'], i)}").number_format = NUM_FMT
     _label(ws_dc, 15, 2, "총 CapEx(추정)", bold=True)
     for i in range(n):
-        col = get_column_letter(3 + i)
-        ws_dc.cell(row=15, column=3 + i, value=f"={col}12+{col}14").number_format = NUM_FMT
-    _col_widths(ws_dc, n + 1)
+        col = proj_col(i)
+        ws_dc.cell(row=15, column=proj_col0 + i, value=f"={col}12+{col}14").number_format = NUM_FMT
+    # 과거 CapEx: CS 현금흐름표의 "유형자산의취득"(투자활동현금흐름 내)을
+    # 찾아 연결한다. 정확히 일치하는 계정이 없으면 빈칸으로 두고 주석만 남김.
+    capex_hist_row = _find_row(cs_raw_rows, cs_names, ['유형자산의취득', '유형자산 취득'])
+    if capex_hist_row:
+        for i in range(H):
+            c = ws_dc.cell(row=15, column=3 + i, value=f"=-CS!{hist_col(i)}{capex_hist_row}")
+            c.number_format = NUM_FMT
+            c.font = BOLD
+    else:
+        ws_dc.cell(row=15, column=2).comment = None  # TODO: CAPEX 과거값 — CS에서 유형자산취득 계정을 찾지 못함
+    _col_widths(ws_dc, H + n + 1)
     capex_row_out = 15
 
     # ════════════════════════════════════════════════════════════════
     # 6. NWC
     # ════════════════════════════════════════════════════════════════
     ws_nwc = wb.create_sheet("NWC")
-    _title(ws_nwc, "순운전자본(NWC) (단위: 백만원)", span=2 + n)
-    _year_header(ws_nwc, 4, 3, proj_years)
-    _label(ws_nwc, 6, 2, "NWC 가정값" + (" (매출대비%)" if nwc_method == 'pct_revenue' else " (고정액)"))
+    _apply_sheet_chrome(ws_nwc)
+    _title(ws_nwc, "순운전자본(NWC) (단위: 백만원)", span=2 + H + n)
+    _style_header_row(ws_nwc)
+
+    # 과거 NWC = (재고자산+매출채권) - 매입채무, BS 원본 계정에서 직접 합산.
+    inv_row = _find_row(bs_raw_rows, bs_names, ['재고자산'])
+    ar_row = _find_row(bs_raw_rows, bs_names, ['매출채권'])
+    ap_row = _find_row(bs_raw_rows, bs_names, ['매입채무'])
+    _label(ws_nwc, 6, 2, "NWC (과거, BS: 재고+매출채권-매입채무)", bold=True)
+    if inv_row and ar_row and ap_row:
+        for i in range(H):
+            col = hist_col(i)
+            c = ws_nwc.cell(row=6, column=3 + i,
+                             value=f"=BS!{col}{inv_row}+BS!{col}{ar_row}-BS!{col}{ap_row}")
+            c.number_format = NUM_FMT
+            c.font = BOLD
+
+    _label(ws_nwc, 7, 2, "NWC 가정값" + (" (매출대비%)" if nwc_method == 'pct_revenue' else " (고정액)"))
     for i in range(n):
-        ws_nwc.cell(row=6, column=3 + i, value=f"={C(cr['nwc'], i)}").number_format = (
+        ws_nwc.cell(row=7, column=proj_col0 + i, value=f"={C(cr['nwc'], i)}").number_format = (
             PCT_FMT if nwc_method == 'pct_revenue' else NUM_FMT)
 
     base_nwc_val = (hist['nwc'].get(base_year, 0)) / 1e6
     if nwc_method == 'pct_revenue':
-        _label(ws_nwc, 7, 2, "NWC 잔액(추정)")
+        _label(ws_nwc, 9, 2, "NWC 잔액(추정)")
         for i in range(n):
-            col = get_column_letter(3 + i)
-            ws_nwc.cell(row=7, column=3 + i, value=f"=Revenue!{col}{rev_row}*{col}6").number_format = NUM_FMT
-        _label(ws_nwc, 8, 2, "ΔNWC(현금유출, +)", bold=True)
+            col = proj_col(i)
+            ws_nwc.cell(row=9, column=proj_col0 + i, value=f"=Revenue!{col}{rev_row}*{col}7").number_format = NUM_FMT
+        _label(ws_nwc, 19, 2, "ΔNWC(현금유출, +)", bold=True)
         for i in range(n):
-            col = get_column_letter(3 + i)
-            prev = base_nwc_val if i == 0 else f"{get_column_letter(3+i-1)}7"
-            prevref = prev if i == 0 else prev
+            col = proj_col(i)
             if i == 0:
-                ws_nwc.cell(row=8, column=3 + i, value=f"={col}7-{base_nwc_val}").number_format = NUM_FMT
+                base_ref = f"{hist_col(H-1)}6" if (inv_row and ar_row and ap_row) else str(base_nwc_val)
+                ws_nwc.cell(row=19, column=proj_col0 + i, value=f"={col}9-{base_ref}").number_format = NUM_FMT
             else:
-                ws_nwc.cell(row=8, column=3 + i, value=f"={col}7-{get_column_letter(3+i-1)}7").number_format = NUM_FMT
+                ws_nwc.cell(row=19, column=proj_col0 + i, value=f"={col}9-{proj_col(i-1)}9").number_format = NUM_FMT
     else:
-        _label(ws_nwc, 8, 2, "ΔNWC(현금유출, +)", bold=True)
+        _label(ws_nwc, 19, 2, "ΔNWC(현금유출, +)", bold=True)
         for i in range(n):
-            col = get_column_letter(3 + i)
-            ws_nwc.cell(row=8, column=3 + i, value=f"={col}6").number_format = NUM_FMT
-    _col_widths(ws_nwc, n + 1)
-    dnwc_row_out = 8
-    nwc_balance_row = 7 if nwc_method == 'pct_revenue' else None
+            col = proj_col(i)
+            ws_nwc.cell(row=19, column=proj_col0 + i, value=f"={col}7").number_format = NUM_FMT
+    _col_widths(ws_nwc, H + n + 1)
+    dnwc_row_out = 19
+    nwc_balance_row = 9 if nwc_method == 'pct_revenue' else None
 
     # ════════════════════════════════════════════════════════════════
     # 7. Debt
     # ════════════════════════════════════════════════════════════════
     ws_debt = wb.create_sheet("Debt")
-    _title(ws_debt, "차입금 · 이자 (단위: 백만원)", span=2 + n)
-    _year_header(ws_debt, 4, 3, proj_years)
+    _apply_sheet_chrome(ws_debt)
+    _title(ws_debt, "차입금 · 이자 (단위: 백만원)", span=2 + H + n)
+    _style_header_row(ws_debt)
 
-    _label(ws_debt, 6, 2, "기초 차입금")
-    base_debt_col = get_column_letter(3 + len(hist_years) - 1)
+    _label(ws_debt, 6, 2, "차입금(과거, BS IBD)", bold=True)
+    if bs_row.get('ibd'):
+        _hist_link_row(ws_debt, 6, "BS", bs_row['ibd'], bold=True)
+
+    _label(ws_debt, 7, 2, "기초 차입금")
     for i in range(n):
-        col = get_column_letter(3 + i)
-        prev = f"BS!{base_debt_col}{bs_row['ibd']}" if i == 0 else f"{get_column_letter(3+i-1)}7"
-        ws_debt.cell(row=6, column=3 + i, value=f"={prev}").number_format = NUM_FMT
-    _label(ws_debt, 7, 2, "기말 차입금", bold=True)
+        col = proj_col(i)
+        prev = f"BS!{hist_col(H-1)}{bs_row['ibd']}" if i == 0 else f"{proj_col(i-1)}8"
+        ws_debt.cell(row=7, column=proj_col0 + i, value=f"={prev}").number_format = NUM_FMT
+    _label(ws_debt, 8, 2, "기말 차입금", bold=True)
     for i in range(n):
-        ws_debt.cell(row=7, column=3 + i, value=f"={C(cr['debt_balance'], i)}").number_format = NUM_FMT
-    _label(ws_debt, 8, 2, "차입금 변동(+조달/-상환)")
+        ws_debt.cell(row=8, column=proj_col0 + i, value=f"={C(cr['debt_balance'], i)}").number_format = NUM_FMT
+    _label(ws_debt, 9, 2, "차입금 변동(+조달/-상환)")
     for i in range(n):
-        col = get_column_letter(3 + i)
-        ws_debt.cell(row=8, column=3 + i, value=f"={col}7-{col}6").number_format = NUM_FMT
+        col = proj_col(i)
+        ws_debt.cell(row=9, column=proj_col0 + i, value=f"={col}8-{col}7").number_format = NUM_FMT
     _label(ws_debt, 10, 2, "적용 이자율(%)")
     for i in range(n):
-        ws_debt.cell(row=10, column=3 + i, value=f"={C(cr['interest_rate'], i)}").number_format = PCT_FMT
+        ws_debt.cell(row=10, column=proj_col0 + i, value=f"={C(cr['interest_rate'], i)}").number_format = PCT_FMT
     _label(ws_debt, 11, 2, "이자비용 (평균차입금 기준)", bold=True)
     for i in range(n):
-        col = get_column_letter(3 + i)
-        ws_debt.cell(row=11, column=3 + i, value=f"=AVERAGE({col}6:{col}7)*{col}10").number_format = NUM_FMT
-    _col_widths(ws_debt, n + 1)
-    debt_end_row, debt_delta_row, interest_row = 7, 8, 11
+        col = proj_col(i)
+        ws_debt.cell(row=11, column=proj_col0 + i, value=f"=AVERAGE({col}7:{col}8)*{col}10").number_format = NUM_FMT
+    _col_widths(ws_debt, H + n + 1)
+    debt_end_row, debt_delta_row, interest_row = 8, 9, 11
 
     # ════════════════════════════════════════════════════════════════
     # 8. Tax
     # ════════════════════════════════════════════════════════════════
     ws_tax = wb.create_sheet("Tax")
+    _apply_sheet_chrome(ws_tax)
     _title(ws_tax, "법인세", span=2 + n)
+    # 참고 양식에서도 Tax 시트는 연도별 시계열이 아니라 단일 가정값(법인세율)만
+    # 갖는 시트이므로 historical Actual 열을 추가하지 않는다.
     _year_header(ws_tax, 4, 3, proj_years)
     _label(ws_tax, 6, 2, "법인세율(%)", bold=True)
     for i in range(n):
@@ -732,8 +768,13 @@ def build_excel_workbook(company_name, hist, asmp, fcff_df, pv_fcff_df,
     # ════════════════════════════════════════════════════════════════
     # 9. WACC
     # ════════════════════════════════════════════════════════════════
+    # 참고 양식 WACC 시트도 연도 시계열이 아니라 단일 시점(point-in-time)
+    # Peer Beta/CAPM/WACC 산출 시트이므로 historical Actual 연도 열은
+    # 추가하지 않는다 (회사 전용 Peer_RAW 비교기업 분기는 의도적으로
+    # 제외하고, Control 패널 직접입력 Rf/Beta/ERP/Kd 방식만 유지).
     ws_w = wb.create_sheet("WACC")
-    _title(ws_w, "WACC 산출", span=4)
+    _apply_sheet_chrome(ws_w)
+    _title(ws_w, "WACC 산출 (단위: %)", span=4)
     _label(ws_w, 4, 2, "무위험수익률 Rf(%)")
     ws_w.cell(row=4, column=3, value=f"={C(cr['rf'][0])}").number_format = PCT_FMT
     _label(ws_w, 5, 2, "베타(β)")
@@ -748,10 +789,11 @@ def build_excel_workbook(company_name, hist, asmp, fcff_df, pv_fcff_df,
     ws_w.cell(row=9, column=3, value=f"={C(cr['ke_direct'][0])}").number_format = PCT_FMT
     _label(ws_w, 10, 2, "최종 Ke", bold=True)
     ws_w.cell(row=10, column=3, value="=IF(C9>0,C9,C8)").number_format = PCT_FMT
-    _label(ws_w, 12, 2, "총차입금")
-    ws_w.cell(row=12, column=3, value=f"=BS!{base_debt_col}{bs_row['ibd']}").number_format = NUM_FMT
-    _label(ws_w, 13, 2, "총자본")
-    ws_w.cell(row=13, column=3, value=f"=BS!{base_debt_col}{bs_row['total_equity']}").number_format = NUM_FMT
+    ws_w.cell(row=10, column=3).fill = LIGHT_NAVY_FILL
+    _label(ws_w, 12, 2, "총차입금 (BS 과거 IBD, 기준연도말)")
+    ws_w.cell(row=12, column=3, value=f"=BS!{hist_col(H-1)}{bs_row['ibd']}").number_format = NUM_FMT
+    _label(ws_w, 13, 2, "총자본 (BS 과거 자본총계, 기준연도말)")
+    ws_w.cell(row=13, column=3, value=f"=BS!{hist_col(H-1)}{bs_row['total_equity']}").number_format = NUM_FMT
     _label(ws_w, 14, 2, "타인자본비중 직접입력(%, 0=BS기준)")
     ws_w.cell(row=14, column=3, value=f"={C(cr['dw_direct'][0])}").number_format = PCT_FMT
     _label(ws_w, 15, 2, "타인자본비중(Dw)", bold=True)
@@ -760,9 +802,13 @@ def build_excel_workbook(company_name, hist, asmp, fcff_df, pv_fcff_df,
     ws_w.cell(row=16, column=3, value="=1-C15").number_format = PCT_FMT
     _label(ws_w, 18, 2, "WACC", bold=True)
     ws_w.cell(row=18, column=3, value=f"=C16*C10+C15*(C7*(1-Tax!C{tax_rate_row}))").number_format = PCT_FMT
+    ws_w.cell(row=18, column=3).fill = LIGHT_NAVY_FILL
+    ws_w.cell(row=18, column=3).font = BOLD
     _label(ws_w, 20, 2, "영구성장률(TGR, %)", bold=True)
     ws_w.cell(row=20, column=3, value=f"={C(cr['tgr'][0])}").number_format = PCT_FMT
-    ws_w.column_dimensions['B'].width = 32
+    for rr_ in range(4, 21):
+        ws_w.cell(row=rr_, column=2).font = BOLD if rr_ in (8, 10, 15, 16, 18, 20) else NORMAL
+    ws_w.column_dimensions['B'].width = 38
     ws_w.column_dimensions['C'].width = 14
     wacc_cell, tgr_cell = "WACC!$C$18", "WACC!$C$20"
 
@@ -770,8 +816,9 @@ def build_excel_workbook(company_name, hist, asmp, fcff_df, pv_fcff_df,
     # 10. FS — 추정 IS / BS / CS (3대 재무제표 통합)
     # ════════════════════════════════════════════════════════════════
     ws_fs = wb.create_sheet("FS")
-    _title(ws_fs, "추정 재무제표 (IS·BS·CS, 단위: 백만원)", span=2 + n)
-    _year_header(ws_fs, 4, 3, proj_years)
+    _apply_sheet_chrome(ws_fs)
+    _title(ws_fs, "재무제표 (과거 Actual + 추정 Estimate, 단위: 백만원)", span=2 + H + n)
+    _style_header_row(ws_fs)
 
     fs = {}
     rr = 6
@@ -800,53 +847,73 @@ def build_excel_workbook(company_name, hist, asmp, fcff_df, pv_fcff_df,
     fs['cff'] = rr; _label(ws_fs, rr, 2, "재무활동현금흐름 = ΔDebt-배당"); rr += 1
     fs['cf_net'] = rr; _label(ws_fs, rr, 2, "현금증감", bold=True); rr += 1
 
-    base_equity_col = get_column_letter(3 + len(hist_years) - 1)
-    base_cash_col = base_equity_col
-    for i in range(n):
-        col = get_column_letter(3 + i)
-        prevcol = get_column_letter(3 + i - 1) if i > 0 else None
-        ws_fs.cell(row=fs['revenue'], column=3+i, value=f"=Revenue!{col}{rev_row}").number_format = NUM_FMT
-        ws_fs.cell(row=fs['cogs'], column=3+i, value=f"=-COGS!{col}{cogs_row_out}").number_format = NUM_FMT
+    # 과거 H개 열: IS/BS/CS 원본 그대로 링크 (가공 없는 실제 보고 항목).
+    for i in range(H):
+        col = hist_col(i)
+        if is_row.get('revenue'):
+            ws_fs.cell(row=fs['revenue'], column=3+i, value=f"=IS!{col}{is_row['revenue']}").number_format = NUM_FMT
+        if is_row.get('cogs'):
+            ws_fs.cell(row=fs['cogs'], column=3+i, value=f"=-IS!{col}{is_row['cogs']}").number_format = NUM_FMT
         ws_fs.cell(row=fs['gp'], column=3+i, value=f"={col}{fs['revenue']}+{col}{fs['cogs']}").number_format = NUM_FMT
-        ws_fs.cell(row=fs['sga'], column=3+i, value=f"=-'SG&A'!{col}{sga_row_out}").number_format = NUM_FMT
+        if is_row.get('sga'):
+            ws_fs.cell(row=fs['sga'], column=3+i, value=f"=-IS!{col}{is_row['sga']}").number_format = NUM_FMT
         ws_fs.cell(row=fs['ebit'], column=3+i, value=f"={col}{fs['gp']}+{col}{fs['sga']}").number_format = NUM_FMT
-        ws_fs.cell(row=fs['interest'], column=3+i, value=f"=-Debt!{col}{interest_row}").number_format = NUM_FMT
-        ws_fs.cell(row=fs['pretax'], column=3+i, value=f"={col}{fs['ebit']}+{col}{fs['interest']}").number_format = NUM_FMT
-        ws_fs.cell(row=fs['tax'], column=3+i, value=f"=-MAX({col}{fs['pretax']},0)*Tax!{col}{tax_rate_row}").number_format = NUM_FMT
-        ws_fs.cell(row=fs['ni'], column=3+i, value=f"={col}{fs['pretax']}+{col}{fs['tax']}").number_format = NUM_FMT
-        ws_fs.cell(row=fs['ni'], column=3+i).font = BOLD
+        ws_fs.cell(row=fs['ebit'], column=3+i).font = BOLD
+        if bs_row.get('total_equity'):
+            ws_fs.cell(row=fs['equity'], column=3+i, value=f"=BS!{col}{bs_row['total_equity']}").number_format = NUM_FMT
+            ws_fs.cell(row=fs['equity'], column=3+i).font = BOLD
+        if bs_row.get('ibd'):
+            ws_fs.cell(row=fs['debt'], column=3+i, value=f"=BS!{col}{bs_row['ibd']}").number_format = NUM_FMT
+        if bs_row.get('cash'):
+            ws_fs.cell(row=fs['cash_end'], column=3+i, value=f"=BS!{col}{bs_row['cash']}").number_format = NUM_FMT
+            ws_fs.cell(row=fs['cash_end'], column=3+i).font = BOLD
 
-        ws_fs.cell(row=fs['ar'], column=3+i, value=f"=NWC!{col}{nwc_balance_row}" if nwc_balance_row else 0).number_format = NUM_FMT
-        ws_fs.cell(row=fs['ppe_delta'], column=3+i, value=f"='D&A CAPEX'!{col}{capex_row_out}-'D&A CAPEX'!{col}{da_row_out}").number_format = NUM_FMT
-        ws_fs.cell(row=fs['debt'], column=3+i, value=f"=Debt!{col}{debt_end_row}").number_format = NUM_FMT
+    for i in range(n):
+        col = proj_col(i)
+        prevcol = hist_col(H-1) if i == 0 else proj_col(i-1)
+        ws_fs.cell(row=fs['revenue'], column=proj_col0+i, value=f"=Revenue!{col}{rev_row}").number_format = NUM_FMT
+        ws_fs.cell(row=fs['cogs'], column=proj_col0+i, value=f"=-COGS!{col}{cogs_row_out}").number_format = NUM_FMT
+        ws_fs.cell(row=fs['gp'], column=proj_col0+i, value=f"={col}{fs['revenue']}+{col}{fs['cogs']}").number_format = NUM_FMT
+        ws_fs.cell(row=fs['sga'], column=proj_col0+i, value=f"=-'SG&A'!{col}{sga_row_out}").number_format = NUM_FMT
+        ws_fs.cell(row=fs['ebit'], column=proj_col0+i, value=f"={col}{fs['gp']}+{col}{fs['sga']}").number_format = NUM_FMT
+        ws_fs.cell(row=fs['interest'], column=proj_col0+i, value=f"=-Debt!{col}{interest_row}").number_format = NUM_FMT
+        ws_fs.cell(row=fs['pretax'], column=proj_col0+i, value=f"={col}{fs['ebit']}+{col}{fs['interest']}").number_format = NUM_FMT
+        ws_fs.cell(row=fs['tax'], column=proj_col0+i, value=f"=-MAX({col}{fs['pretax']},0)*Tax!{col}{tax_rate_row}").number_format = NUM_FMT
+        ws_fs.cell(row=fs['ni'], column=proj_col0+i, value=f"={col}{fs['pretax']}+{col}{fs['tax']}").number_format = NUM_FMT
+        ws_fs.cell(row=fs['ni'], column=proj_col0+i).font = BOLD
+
+        ws_fs.cell(row=fs['ar'], column=proj_col0+i, value=f"=NWC!{col}{nwc_balance_row}" if nwc_balance_row else 0).number_format = NUM_FMT
+        ws_fs.cell(row=fs['ppe_delta'], column=proj_col0+i, value=f"='D&A CAPEX'!{col}{capex_row_out}-'D&A CAPEX'!{col}{da_row_out}").number_format = NUM_FMT
+        ws_fs.cell(row=fs['debt'], column=proj_col0+i, value=f"=Debt!{col}{debt_end_row}").number_format = NUM_FMT
 
         if div_method == 'payout_ratio':
-            ws_fs.cell(row=fs['div'], column=3+i, value=f"=MAX({col}{fs['ni']},0)*{C(cr['dividend'], i)}").number_format = NUM_FMT
+            ws_fs.cell(row=fs['div'], column=proj_col0+i, value=f"=MAX({col}{fs['ni']},0)*{C(cr['dividend'], i)}").number_format = NUM_FMT
         else:
             shares_ref = C(cr['shares'][0])
-            ws_fs.cell(row=fs['div'], column=3+i, value=f"={C(cr['dividend'], i)}*{shares_ref}/1000000").number_format = NUM_FMT
+            ws_fs.cell(row=fs['div'], column=proj_col0+i, value=f"={C(cr['dividend'], i)}*{shares_ref}/1000000").number_format = NUM_FMT
 
-        prev_equity = f"BS!{base_equity_col}{bs_row['total_equity']}" if i == 0 else f"{prevcol}{fs['equity']}"
-        ws_fs.cell(row=fs['equity'], column=3+i, value=f"={prev_equity}+{col}{fs['ni']}-{col}{fs['div']}").number_format = NUM_FMT
-        ws_fs.cell(row=fs['equity'], column=3+i).font = BOLD
+        prev_equity = f"BS!{hist_col(H-1)}{bs_row['total_equity']}" if i == 0 else f"{prevcol}{fs['equity']}"
+        ws_fs.cell(row=fs['equity'], column=proj_col0+i, value=f"={prev_equity}+{col}{fs['ni']}-{col}{fs['div']}").number_format = NUM_FMT
+        ws_fs.cell(row=fs['equity'], column=proj_col0+i).font = BOLD
 
-        ws_fs.cell(row=fs['cfo'], column=3+i, value=f"={col}{fs['ni']}+'D&A CAPEX'!{col}{da_row_out}-NWC!{col}{dnwc_row_out}").number_format = NUM_FMT
-        ws_fs.cell(row=fs['cfi'], column=3+i, value=f"=-'D&A CAPEX'!{col}{capex_row_out}").number_format = NUM_FMT
-        ws_fs.cell(row=fs['cff'], column=3+i, value=f"=Debt!{col}{debt_delta_row}-{col}{fs['div']}").number_format = NUM_FMT
-        ws_fs.cell(row=fs['cf_net'], column=3+i, value=f"={col}{fs['cfo']}+{col}{fs['cfi']}+{col}{fs['cff']}").number_format = NUM_FMT
-        ws_fs.cell(row=fs['cf_net'], column=3+i).font = BOLD
+        ws_fs.cell(row=fs['cfo'], column=proj_col0+i, value=f"={col}{fs['ni']}+'D&A CAPEX'!{col}{da_row_out}-NWC!{col}{dnwc_row_out}").number_format = NUM_FMT
+        ws_fs.cell(row=fs['cfi'], column=proj_col0+i, value=f"=-'D&A CAPEX'!{col}{capex_row_out}").number_format = NUM_FMT
+        ws_fs.cell(row=fs['cff'], column=proj_col0+i, value=f"=Debt!{col}{debt_delta_row}-{col}{fs['div']}").number_format = NUM_FMT
+        ws_fs.cell(row=fs['cf_net'], column=proj_col0+i, value=f"={col}{fs['cfo']}+{col}{fs['cfi']}+{col}{fs['cff']}").number_format = NUM_FMT
+        ws_fs.cell(row=fs['cf_net'], column=proj_col0+i).font = BOLD
 
-        prev_cash = f"BS!{base_cash_col}{bs_row['cash']}" if i == 0 else f"{prevcol}{fs['cash_end']}"
-        ws_fs.cell(row=fs['cash_end'], column=3+i, value=f"={prev_cash}+{col}{fs['cf_net']}").number_format = NUM_FMT
+        prev_cash = f"BS!{hist_col(H-1)}{bs_row['cash']}" if i == 0 else f"{prevcol}{fs['cash_end']}"
+        ws_fs.cell(row=fs['cash_end'], column=proj_col0+i, value=f"={prev_cash}+{col}{fs['cf_net']}").number_format = NUM_FMT
 
-    _col_widths(ws_fs, n + 1, 16)
+    _col_widths(ws_fs, H + n + 1, 16)
 
     # ════════════════════════════════════════════════════════════════
     # 11. DCF
     # ════════════════════════════════════════════════════════════════
     ws_d = wb.create_sheet("DCF")
-    _title(ws_d, f"{company_name} — DCF (단위: 백만원)", span=2 + n)
-    _year_header(ws_d, 4, 3, proj_years)
+    _apply_sheet_chrome(ws_d)
+    _title(ws_d, f"{company_name} — DCF (단위: 백만원, 과거 Actual + 추정 Estimate)", span=2 + H + n)
+    _style_header_row(ws_d)
 
     line_rows = {
         '매출액': 6, '매출원가': 7, '매출총이익': 8, '판관비': 9, '영업이익(EBIT)': 10,
@@ -855,26 +922,50 @@ def build_excel_workbook(company_name, hist, asmp, fcff_df, pv_fcff_df,
     }
     for label, row in line_rows.items():
         _label(ws_d, row, 2, label, bold=label in ('영업이익(EBIT)', 'FCFF', 'PV(FCFF)'))
+        if label in ('영업이익(EBIT)', 'FCFF', 'PV(FCFF)'):
+            for c in range(2, 3 + H + n):
+                ws_d.cell(row=row, column=c).fill = LIGHT_NAVY_FILL
+
+    # 과거(Actual) 구간: 참고 양식과 동일하게 IS 원본 매출액/매출원가/판관비를
+    # 그대로 끌어오고, NOPAT 이하(D&A/CapEx/NWC/FCFF/할인 등 "현금흐름 추정"
+    # 항목)은 과거 구간에서는 비워 둔다 — 과거 실적은 실측 손익만 보여주고
+    # FCFF 계산은 추정구간에서만 의미를 갖기 때문(참고 양식 Row14 이하도
+    # O열부터 비로소 값이 채워짐).
+    for i in range(H):
+        col = hist_col(i)
+        if is_row.get('revenue'):
+            ws_d.cell(row=6, column=3+i, value=f"=+IS!{col}{is_row['revenue']}").number_format = NUM_FMT
+        if is_row.get('cogs'):
+            ws_d.cell(row=7, column=3+i, value=f"=-IS!{col}{is_row['cogs']}").number_format = NUM_FMT
+        ws_d.cell(row=8, column=3+i, value=f"={col}6+{col}7").number_format = NUM_FMT
+        if is_row.get('sga'):
+            ws_d.cell(row=9, column=3+i, value=f"=-IS!{col}{is_row['sga']}").number_format = NUM_FMT
+        ws_d.cell(row=10, column=3+i, value=f"={col}8+{col}9").number_format = NUM_FMT
+        ws_d.cell(row=10, column=3+i).font = BOLD
+        if cs_row.get('da'):
+            ws_d.cell(row=12, column=3+i, value=f"=+CS!{col}{cs_row['da']}").number_format = NUM_FMT
 
     for i in range(n):
-        col = get_column_letter(3 + i)
-        ws_d.cell(row=6, column=3+i, value=f"=Revenue!{col}{rev_row}").number_format = NUM_FMT
-        ws_d.cell(row=7, column=3+i, value=f"=-COGS!{col}{cogs_row_out}").number_format = NUM_FMT
-        ws_d.cell(row=8, column=3+i, value=f"={col}6+{col}7").number_format = NUM_FMT
-        ws_d.cell(row=9, column=3+i, value=f"=-'SG&A'!{col}{sga_row_out}").number_format = NUM_FMT
-        ws_d.cell(row=10, column=3+i, value=f"={col}8+{col}9").number_format = NUM_FMT
-        ws_d.cell(row=11, column=3+i, value=f"={col}10*(1-Tax!{col}{tax_rate_row})").number_format = NUM_FMT
-        ws_d.cell(row=12, column=3+i, value=f"='D&A CAPEX'!{col}{da_row_out}").number_format = NUM_FMT
-        ws_d.cell(row=13, column=3+i, value=f"=-'D&A CAPEX'!{col}{capex_row_out}").number_format = NUM_FMT
-        ws_d.cell(row=14, column=3+i, value=f"=-NWC!{col}{dnwc_row_out}").number_format = NUM_FMT
-        ws_d.cell(row=15, column=3+i, value=f"=SUM({col}11:{col}14)").number_format = NUM_FMT
-        ws_d.cell(row=15, column=3+i).font = BOLD
-        ws_d.cell(row=16, column=3+i, value=f"=1/(1+{wacc_cell})^{i+1}").number_format = '0.0000'
-        ws_d.cell(row=17, column=3+i, value=f"={col}15*{col}16").number_format = NUM_FMT
+        col = proj_col(i)
+        ws_d.cell(row=6, column=proj_col0+i, value=f"=Revenue!{col}{rev_row}").number_format = NUM_FMT
+        ws_d.cell(row=7, column=proj_col0+i, value=f"=-COGS!{col}{cogs_row_out}").number_format = NUM_FMT
+        ws_d.cell(row=8, column=proj_col0+i, value=f"={col}6+{col}7").number_format = NUM_FMT
+        ws_d.cell(row=9, column=proj_col0+i, value=f"=-'SG&A'!{col}{sga_row_out}").number_format = NUM_FMT
+        ws_d.cell(row=10, column=proj_col0+i, value=f"={col}8+{col}9").number_format = NUM_FMT
+        ws_d.cell(row=10, column=proj_col0+i).font = BOLD
+        ws_d.cell(row=11, column=proj_col0+i, value=f"={col}10*(1-Tax!{col}{tax_rate_row})").number_format = NUM_FMT
+        ws_d.cell(row=12, column=proj_col0+i, value=f"='D&A CAPEX'!{col}{da_row_out}").number_format = NUM_FMT
+        ws_d.cell(row=13, column=proj_col0+i, value=f"=-'D&A CAPEX'!{col}{capex_row_out}").number_format = NUM_FMT
+        ws_d.cell(row=14, column=proj_col0+i, value=f"=-NWC!{col}{dnwc_row_out}").number_format = NUM_FMT
+        ws_d.cell(row=15, column=proj_col0+i, value=f"=SUM({col}11:{col}14)").number_format = NUM_FMT
+        ws_d.cell(row=15, column=proj_col0+i).font = BOLD
+        ws_d.cell(row=16, column=proj_col0+i, value=f"=1/(1+{wacc_cell})^{i+1}").number_format = '0.0000'
+        ws_d.cell(row=17, column=proj_col0+i, value=f"={col}15*{col}16").number_format = NUM_FMT
 
-    last_col = get_column_letter(2 + n)
+    last_col = proj_col(n - 1)
+    first_proj_col = proj_col(0)
     _label(ws_d, 20, 2, "PV(FCFF) 합계", bold=True)
-    ws_d.cell(row=20, column=3, value=f"=SUM(C17:{last_col}17)").number_format = NUM_FMT
+    ws_d.cell(row=20, column=3, value=f"=SUM({first_proj_col}17:{last_col}17)").number_format = NUM_FMT
 
     # Terminal Value: 마지막 연도의 "할인 전" FCFF를 기준으로 영구가치를 구하고,
     # 마지막 연도의 할인계수를 한 번만 곱해서 PV(TV)를 구한다 (참고 양식에 있던
@@ -886,17 +977,20 @@ def build_excel_workbook(company_name, hist, asmp, fcff_df, pv_fcff_df,
 
     _label(ws_d, 24, 2, "기업가치(EV)", bold=True)
     ws_d.cell(row=24, column=3, value="=C20+C22").number_format = NUM_FMT
+    ws_d.cell(row=24, column=3).fill = LIGHT_NAVY_FILL
     _label(ws_d, 25, 2, "(-) 순차입금")
     ws_d.cell(row=25, column=3, value=net_debt / 1e6).number_format = NUM_FMT
     ws_d.cell(row=25, column=3).fill = INPUT_FILL
     _label(ws_d, 26, 2, "자기자본가치", bold=True)
     ws_d.cell(row=26, column=3, value="=C24-C25").number_format = NUM_FMT
+    ws_d.cell(row=26, column=3).fill = LIGHT_NAVY_FILL
     _label(ws_d, 27, 2, "발행주식수")
     ws_d.cell(row=27, column=3, value=f"={C(cr['shares'][0])}").number_format = '#,##0'
     _label(ws_d, 28, 2, "주당가치(원)", bold=True)
     ws_d.cell(row=28, column=3, value="=IF(C27>0,C26*1000000/C27,\"N/A\")").number_format = '#,##0'
+    ws_d.cell(row=28, column=3).fill = LIGHT_NAVY_FILL
 
-    _col_widths(ws_d, n + 1)
+    _col_widths(ws_d, H + n + 1)
 
     # ────────────────────────────────────────────────────────────────
     # 시트 순서: Control, DCF, WACC, FS, Revenue, COGS, SG&A, D&A CAPEX, NWC, Debt, Tax, BS, IS, CS
