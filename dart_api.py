@@ -692,7 +692,7 @@ def get_financial_statements(corp_code, year, api_key, report_type='11011', fs_d
                 need_capex = cf.get('capex', 0) == 0
                 if need_da or need_capex:
                     try:
-                        xbrl_result = get_da_capex_from_xbrl_notes(corp_code, year, key, rprt_code)
+                        xbrl_result = get_da_capex_from_xbrl_notes(corp_code, year, key, rprt_code, fs_div=div)
                     except Exception:
                         xbrl_result = None
                     if xbrl_result:
@@ -823,7 +823,14 @@ def _local_tag(tag):
     return tag
 
 
-def _xbrl_build_duration_contexts(root, target_year=None):
+_CONSOLIDATED_SCOPE_AXIS_SUFFIX = 'consolidatedandseparatefinancialstatementsaxis'
+_CONSOLIDATED_SCOPE_MEMBERS = {
+    'CFS': 'consolidatedmember',
+    'OFS': 'separatemember',
+}
+
+
+def _xbrl_build_duration_contexts(root, target_year=None, fs_div=None):
     """<context> 엘리먼트 중 기간(duration)을 나타내는 contextRef id 집합을 만든다.
     instant(시점) 컨텍스트는 재무상태표용이라 D&A/CapEx(둘 다 기간 항목)에는
     해당하지 않으므로 제외한다.
@@ -838,6 +845,14 @@ def _xbrl_build_duration_contexts(root, target_year=None):
     약 330~380일(연간) 범위를 벗어나는 context는 제외한다 — 그러지 않으면
     같은 axis 아래 여러 회계연도 facts가 함께 합산되어 D&A가 몇 배로
     부풀려지는 문제가 생긴다.
+
+    fs_div가 주어지면, ConsolidatedAndSeparateFinancialStatementsAxis로
+    연결(Consolidated)/별도(Separate) 범위를 함께 태깅한 context 중
+    요청한 범위(fs_div='CFS'->연결, 'OFS'->별도)와 다른 멤버를 가진 것은
+    제외한다. 이 axis는 "분류 항목"이 아니라 "같은 회사를 보는 두 가지
+    스코프"이므로, 둘을 같은 axis-group으로 묶어 더하면 연결+별도 금액이
+    그대로 합산되어 실제 금액의 약 1.7~1.8배로 부풀려진다 (삼성전자 등에서
+    확인됨).
     """
     duration_ctx = {}
     for ctx in root.iter():
@@ -850,6 +865,7 @@ def _xbrl_build_duration_contexts(root, target_year=None):
         has_segment = False
         axes = set()
         members = []
+        scope_member = None
         for child in ctx:
             if _local_tag(child.tag) == 'period':
                 start_el = None
@@ -872,8 +888,15 @@ def _xbrl_build_duration_contexts(root, target_year=None):
                                 dim = member.get('dimension')
                                 if dim:
                                     axes.add(dim)
-                                    members.append(f"{dim}={(member.text or '').strip()}")
+                                    member_text = (member.text or '').strip()
+                                    members.append(f"{dim}={member_text}")
+                                    if dim.lower().endswith(_CONSOLIDATED_SCOPE_AXIS_SUFFIX):
+                                        scope_member = member_text.lower()
         if period is not None:
+            if fs_div is not None and scope_member is not None:
+                wanted_member = _CONSOLIDATED_SCOPE_MEMBERS.get(fs_div)
+                if wanted_member is not None and not scope_member.endswith(wanted_member):
+                    continue
             if target_year is not None:
                 start_str, end_str = period
                 try:
@@ -977,7 +1000,7 @@ def _xbrl_extract_facts(root, duration_ctx, tag_patterns, exclude_patterns=None,
     return no_seg_total if no_seg_found else 0.0
 
 
-def get_da_capex_from_xbrl_notes(corp_code, year, api_key, report_type='11011'):
+def get_da_capex_from_xbrl_notes(corp_code, year, api_key, report_type='11011', fs_div='CFS'):
     """fnlttSinglAcntAll.json 본문(4대 재무제표)에는 D&A/CapEx가 0으로
     잡히는 경우(예: 삼성전자 별도재무제표처럼 현금흐름표 본문에 감가상각비
     줄 자체가 없고, 유형자산 주석의 "당기증가(상각)" 컬럼에만 있는 경우)를
@@ -1056,7 +1079,7 @@ def get_da_capex_from_xbrl_notes(corp_code, year, api_key, report_type='11011'):
                 if lt not in ('context', 'unit') and lt not in tag_samples:
                     tag_samples.append(lt)
 
-            duration_ctx = _xbrl_build_duration_contexts(root, target_year=year)
+            duration_ctx = _xbrl_build_duration_contexts(root, target_year=year, fs_div=fs_div)
             if not duration_ctx:
                 debug.setdefault('no_duration_ctx_files', []).append(fname)
                 continue
