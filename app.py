@@ -1134,9 +1134,13 @@ elif page == 'DCF 가정 입력':
 
     st.markdown("**이자율**")
     implied_rates = [hist['implied_interest_rate'].get(yr, 0) for yr in hist_years if hist['implied_interest_rate'].get(yr, 0) > 0]
-    default_rate = round(sum(implied_rates) / len(implied_rates), 2) if implied_rates else 4.0
-    st.caption(f"과거 평균 implied 이자율(이자비용/차입금) = {default_rate:.2f}% 를 기본값으로 사용합니다. 필요시 직접 수정하세요.")
-    asmp['interest_rate'] = st.number_input("적용 이자율 (%)", value=float(asmp.get('interest_rate', default_rate)),
+    default_rate_raw = round(sum(implied_rates) / len(implied_rates), 2) if implied_rates else 4.0
+    # 차입금이 연도별로 거의 0에 가까운 회사는 이자비용/차입금 비율이 비정상적으로
+    # 커질 수 있어(분모가 작음), 입력란의 max_value(30%)를 넘는 기본값이 들어오면
+    # number_input이 에러를 내므로 표시용 캡션과 별개로 위젯 기본값은 30%로 clamp
+    default_rate = min(default_rate_raw, 30.0)
+    st.caption(f"과거 평균 implied 이자율(이자비용/차입금) = {default_rate_raw:.2f}% (참고용, 차입금이 매우 작은 연도가 있으면 왜곡될 수 있음)")
+    asmp['interest_rate'] = st.number_input("적용 이자율 (%)", value=min(float(asmp.get('interest_rate', default_rate)), 30.0),
                                               min_value=0.0, max_value=30.0, step=0.1)
 
     st.markdown("**배당**")
