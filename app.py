@@ -61,6 +61,7 @@ def init_session_state():
         'page': '기업 검색',
         'fs_div': 'CFS',
         'reprt_code': '11011',
+        'amount_unit': '억원',
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -69,12 +70,19 @@ def init_session_state():
 init_session_state()
 
 # ─── Utility ──────────────────────────────────────────────────────────────────
+# 기업검색 탭에서 선택한 표시 단위(천원/백만원/억원)에 맞춰 모든 금액 표시를 변환
+UNIT_DIVISORS = {'천원': 1e3, '백만원': 1e6, '억원': 1e8}
+
+def current_unit():
+    return st.session_state.get('amount_unit', '억원')
+
 def fmt_억(value):
-    """원(KRW) 단위 값을 억원으로 변환 후 포맷"""
+    """원(KRW) 단위 값을 선택된 표시 단위로 변환 후 포맷 (함수명은 호환을 위해 유지)"""
     if value is None or (isinstance(value, float) and np.isnan(value)):
         return "N/A"
-    억 = value / 1e8
-    return f"{억:,.1f}"
+    divisor = UNIT_DIVISORS[current_unit()]
+    converted = value / divisor
+    return f"{converted:,.1f}"
 
 def safe_div(a, b, default=0.0):
     try:
@@ -85,7 +93,7 @@ def safe_div(a, b, default=0.0):
         return default
 
 def fmt_df(df):
-    """DataFrame의 숫자 셀을 억원 단위로 포맷 (pandas 2.1+ 호환)"""
+    """DataFrame의 숫자 셀을 선택된 표시 단위로 포맷 (pandas 2.1+ 호환)"""
     return df.map(lambda x: fmt_억(x) if isinstance(x, (int, float)) and x != 0 else ('-' if x == 0 else x))
 
 def calc_korea_corp_tax_rate(taxable_income_억: float) -> float:
@@ -259,6 +267,12 @@ if page == '기업 검색':
 
     if not st.session_state.api_key:
         st.warning("먼저 사이드바에서 DART API Key를 입력해주세요.")
+
+    st.selectbox(
+        "금액 표시 단위", list(UNIT_DIVISORS.keys()),
+        key='amount_unit',
+        help="이후 모든 화면(재무제표 확인, DCF 가정 입력, DCF 결과)의 금액 표시에 적용됩니다.",
+    )
 
     col1, col2 = st.columns([3, 1])
     with col1:
@@ -489,7 +503,8 @@ elif page == '재무제표 확인':
     st.caption(f"재무제표 구분: {st.session_state.fs_div} | 기준연도: {base_year}")
 
     # 손익계산서 (연도를 열로 표시, 오름차순) — 이익률 지표를 해당 항목 바로 아래에 함께 표시
-    st.markdown("#### 손익계산서 (단위: 억원)")
+    u = current_unit()
+    st.markdown(f"#### 손익계산서 (단위: {u})")
     is_display = {}
     for yr in years:
         rev = hist['revenue'].get(yr, 1) or 1
@@ -501,17 +516,17 @@ elif page == '재무제표 확인':
         eq = hist['total_equity'].get(yr, 1) or 1
         assets = hist['total_assets'].get(yr, 1) or 1
         is_display[str(yr)] = {
-            '매출액(억원)': f"{rev/1e8:,.1f}",
-            '매출원가(억원)': f"{cogs_v/1e8:,.1f}",
+            f'매출액({u})': fmt_억(rev),
+            f'매출원가({u})': fmt_억(cogs_v),
             '매출원가율': f"{safe_div(cogs_v, rev)*100:.1f}%",
-            '매출총이익(억원)': f"{hist['gross_profit'].get(yr,0)/1e8:,.1f}",
-            '판관비(억원)': f"{hist['sga'].get(yr,0)/1e8:,.1f}",
-            '감가상각비(D&A)(억원)': f"{da_v/1e8:,.1f}",
-            '영업이익(EBIT)(억원)': f"{ebit_v/1e8:,.1f}",
+            f'매출총이익({u})': fmt_억(hist['gross_profit'].get(yr,0)),
+            f'판관비({u})': fmt_억(hist['sga'].get(yr,0)),
+            f'감가상각비(D&A)({u})': fmt_억(da_v),
+            f'영업이익(EBIT)({u})': fmt_억(ebit_v),
             '영업이익률': f"{safe_div(ebit_v, rev)*100:.1f}%",
-            'EBITDA(억원)': f"{ebitda_v/1e8:,.1f}",
+            f'EBITDA({u})': fmt_억(ebitda_v),
             'EBITDA마진율': f"{safe_div(ebitda_v, rev)*100:.1f}%",
-            '순이익(억원)': f"{ni/1e8:,.1f}",
+            f'순이익({u})': fmt_억(ni),
             '순이익률': f"{safe_div(ni, rev)*100:.1f}%",
             'ROE': f"{safe_div(ni, eq)*100:.1f}%",
             'ROA': f"{safe_div(ni, assets)*100:.1f}%",
@@ -519,7 +534,7 @@ elif page == '재무제표 확인':
     st.dataframe(pd.DataFrame(is_display), use_container_width=True)
 
     # 재무상태표 (연도를 열로 표시, 오름차순)
-    st.markdown("#### 재무상태 (단위: 억원)")
+    st.markdown(f"#### 재무상태 (단위: {u})")
     bs_rows = {
         '총자산': hist['total_assets'],
         '총부채': {yr: hist['total_assets'].get(yr,0) - hist['total_equity'].get(yr,0) for yr in years},
@@ -532,7 +547,7 @@ elif page == '재무제표 확인':
     st.dataframe(fmt_df(bs_df), use_container_width=True)
 
     # 현금흐름 (연도를 열로 표시, 오름차순)
-    st.markdown("#### 현금흐름 (단위: 억원)")
+    st.markdown(f"#### 현금흐름 (단위: {u})")
     cf_rows = {
         '영업활동CF': hist['operating_cf'],
         '투자활동CF': hist['investing_cf'],
@@ -554,11 +569,11 @@ elif page == '재무제표 확인':
             rev_yr = hist['revenue'].get(yr, 0)
             cogs_yr = hist['cogs'].get(yr, 0)
             nwc_detail[str(yr)] = {
-                '매출액(억원)': f"{rev_yr/1e8:,.1f}",
-                '매출원가(억원)': f"{cogs_yr/1e8:,.1f}",
-                '매출채권(억원)': f"{ar/1e8:,.1f}",
-                '재고자산(억원)': f"{inv/1e8:,.1f}",
-                '매입채무(억원)': f"{ap/1e8:,.1f}",
+                f'매출액({u})': fmt_억(rev_yr),
+                f'매출원가({u})': fmt_억(cogs_yr),
+                f'매출채권({u})': fmt_억(ar),
+                f'재고자산({u})': fmt_억(inv),
+                f'매입채무({u})': fmt_억(ap),
                 'DSO(일)': f"{hist['dso'].get(yr,0):.1f}",
                 'DIO(일)': f"{hist['dio'].get(yr,0):.1f}",
                 'DPO(일)': f"{hist['dpo'].get(yr,0):.1f}",
@@ -573,11 +588,12 @@ elif page == '재무제표 확인':
 
     with col1:
         fig_rev = go.Figure()
-        rev_vals = [hist['revenue'].get(yr, 0) / 1e8 for yr in yrs_sorted]
-        ebit_vals = [hist['ebit'].get(yr, 0) / 1e8 for yr in yrs_sorted]
+        divisor = UNIT_DIVISORS[u]
+        rev_vals = [hist['revenue'].get(yr, 0) / divisor for yr in yrs_sorted]
+        ebit_vals = [hist['ebit'].get(yr, 0) / divisor for yr in yrs_sorted]
         fig_rev.add_trace(go.Bar(name='매출액', x=[str(y) for y in yrs_sorted], y=rev_vals, marker_color='steelblue'))
         fig_rev.add_trace(go.Bar(name='영업이익', x=[str(y) for y in yrs_sorted], y=ebit_vals, marker_color='orange'))
-        fig_rev.update_layout(title='매출액 및 영업이익 추이', yaxis_title='억원', barmode='group', height=350)
+        fig_rev.update_layout(title='매출액 및 영업이익 추이', yaxis_title=u, barmode='group', height=350)
         st.plotly_chart(fig_rev, use_container_width=True)
 
     with col2:
