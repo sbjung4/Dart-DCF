@@ -834,6 +834,13 @@ elif page == 'DCF 가정 입력':
                     st.caption(f"XBRL 주석 폴백 진단 — 단계: `{xbrl_dbg.get('stage')}`")
                     if xbrl_dbg.get('rcept_no'):
                         st.caption(f"접수번호(rcept_no): {xbrl_dbg['rcept_no']}")
+                    if xbrl_dbg.get('da_breakdown'):
+                        b = xbrl_dbg['da_breakdown']
+                        st.caption(
+                            f"D&A 구성: 감가상각비(유형자산) {b.get('ppe', 0):,.0f} + "
+                            f"무형자산상각비 {b.get('intangible', 0):,.0f} + "
+                            f"사용권자산상각비 {b.get('rou', 0):,.0f}"
+                        )
                     if xbrl_dbg.get('detail'):
                         st.code(str(xbrl_dbg['detail'])[:1000])
                     if xbrl_dbg.get('tag_sample'):

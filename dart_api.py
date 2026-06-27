@@ -764,11 +764,33 @@ def _find_rcept_no(corp_code, year, api_key, report_type='11011'):
     return None
 
 
-# 비차원(non-dimensional) XBRL 사실(fact) 태그 중 감가상각/상각 관련으로 볼 수
-# 있는 로컬 태그명 패턴 (대소문자 무시, 부분 일치)
-_XBRL_DA_TAG_PATTERNS = ['depreciation', 'amortisation', 'amortization']
+# D&A는 영업활동현금흐름의 "현금의 유출이 없는 비용 등의 가산" 항목 기준으로
+# 감가상각비(유형자산) + 무형자산상각비 + 사용권자산상각비 세 가지를 각각
+# 찾아서 더한다 (메인 현금흐름표 키워드 매칭과 동일한 분류를, 메인 표에 없고
+# XBRL 주석에만 태깅된 경우를 위해 그대로 적용). 예전에는 'depreciation'/
+# 'amortisation' 부분일치로 모든 태그를 뭉쳐서 합산했는데, 그러면 유형자산
+# 주석의 "기초/기말 누계", "처분", "손상" 같은 무관한 항목까지 섞여 들어가
+# 숫자가 틀어졌다 — 세 카테고리로 분리하고 각 카테고리에 맞는 표준
+# ifrs-full 태그명만 정확히 매칭해 그 문제를 막는다.
+_XBRL_DA_PPE_TAG_PATTERNS = [
+    'depreciationpropertyplantandequipment',
+    'depreciationofpropertyplantandequipment',
+]
+_XBRL_DA_INTANGIBLE_TAG_PATTERNS = [
+    'amortisationintangibleassets',
+    'amortisationofintangibleassets',
+    'amortizationintangibleassets',
+    'amortizationofintangibleassets',
+]
+_XBRL_DA_ROU_TAG_PATTERNS = [
+    'depreciationrightofuseassets',
+    'depreciationofrightofuseassets',
+]
+# 위 세 카테고리에 매칭되더라도 "감가상각비"가 아닌 누계/처분/손상 관련
+# 태그는 제외 (예: AccumulatedDepreciationPropertyPlantAndEquipment,
+# DepreciationPropertyPlantAndEquipmentDisposals, ImpairmentLoss...)
 _XBRL_DA_EXCLUDE_TAG_PATTERNS = [
-    'accumulateddepreciation', 'accumulatedamortisation', 'accumulatedamortization',
+    'accumulated', 'disposal', 'impairment', 'revaluation', 'increasedecrease',
 ]
 _XBRL_CAPEX_TAG_PATTERNS = [
     'purchaseofpropertyplantandequipment',
@@ -969,15 +991,27 @@ def get_da_capex_from_xbrl_notes(corp_code, year, api_key, report_type='11011'):
                 debug.setdefault('no_duration_ctx_files', []).append(fname)
                 continue
 
-            da_val = _xbrl_extract_facts(
-                root, duration_ctx, _XBRL_DA_TAG_PATTERNS, _XBRL_DA_EXCLUDE_TAG_PATTERNS,
+            # 감가상각비(유형자산) + 무형자산상각비 + 사용권자산상각비를 각각
+            # 정확한 태그명으로 따로 찾아 합산 (영업활동현금흐름 조정항목 기준)
+            da_ppe_val = _xbrl_extract_facts(
+                root, duration_ctx, _XBRL_DA_PPE_TAG_PATTERNS, _XBRL_DA_EXCLUDE_TAG_PATTERNS,
             )
+            da_intangible_val = _xbrl_extract_facts(
+                root, duration_ctx, _XBRL_DA_INTANGIBLE_TAG_PATTERNS, _XBRL_DA_EXCLUDE_TAG_PATTERNS,
+            )
+            da_rou_val = _xbrl_extract_facts(
+                root, duration_ctx, _XBRL_DA_ROU_TAG_PATTERNS, _XBRL_DA_EXCLUDE_TAG_PATTERNS,
+            )
+            da_val = da_ppe_val + da_intangible_val + da_rou_val
             capex_val = _xbrl_extract_facts(
                 root, duration_ctx, _XBRL_CAPEX_TAG_PATTERNS,
             )
             if da_val > da_total:
                 da_total = da_val
                 found_any = True
+                debug['da_breakdown'] = {
+                    'ppe': da_ppe_val, 'intangible': da_intangible_val, 'rou': da_rou_val,
+                }
             if capex_val > capex_total:
                 capex_total = capex_val
                 found_any = True
