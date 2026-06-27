@@ -829,24 +829,6 @@ elif page == 'DCF 가정 입력':
     st.markdown("**과거 D&A / CapEx 실적**")
     st.dataframe(pd.DataFrame(da_capex_hist), use_container_width=True)
 
-    with st.expander("🔎 D&A 구성요소 보기 (메인 재무제표 기준 — 어떤 계정이 얼마씩 더해졌는지)"):
-        u_dbg = current_unit()
-        breakdown_rows = {}
-        for yr in hist_years:
-            breakdown_rows[str(yr)] = {
-                f'PPE 감가상각비({u_dbg})': fmt_억(hist['da_ppe'].get(yr, 0)),
-                f'무형자산상각비({u_dbg})': fmt_억(hist['da_intangible'].get(yr, 0)),
-                f'사용권자산(ROU)상각비({u_dbg})': fmt_억(hist['da_rou'].get(yr, 0)),
-                f'결합계정(감가상각비와무형자산상각비)({u_dbg})': fmt_억(hist['da_combined_account'].get(yr, 0)),
-                f'IS측 D&A({u_dbg})': fmt_억(hist['da_is_side'].get(yr, 0)),
-                f'최종 채택 D&A({u_dbg})': fmt_억(hist['da'].get(yr, 0)),
-            }
-        st.dataframe(pd.DataFrame(breakdown_rows), use_container_width=True)
-        st.caption(
-            "최종 채택 D&A = PPE+무형자산+ROU 합계가 있으면 그 합계, 없으면 결합계정, "
-            "없으면 IS측, 모두 0이면 '상각비' 키워드 전체 합산(최종 폴백) 또는 XBRL 주석 폴백 값."
-        )
-
     # D&A가 0으로 잡힌 연도가 있으면, DART가 실제로 내려준 CF/IS 계정명을
     # 그대로 보여줘서 어떤 명칭으로 들어오는지 직접 확인할 수 있게 한다.
     # XBRL 주석 폴백이 값을 찾아낸 연도는 D&A가 0이 아니게 되므로 자동으로
