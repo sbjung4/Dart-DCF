@@ -256,6 +256,9 @@ ACCOUNT_MAP = {
         'dart_PurchaseOfPropertyPlantAndEquipment',
         'PurchaseOfPropertyPlantAndEquipment',
         'ifrs-full_AcquisitionOfPropertyPlantAndEquipment',
+        'ifrs-full_PurchaseOfIntangibleAssets',
+        'dart_PurchaseOfIntangibleAssets',
+        'PurchaseOfIntangibleAssets',
     ],
     # Individual D&A components
     'da_ppe': [
@@ -513,17 +516,17 @@ def _extract_financials_from_items(items):
     operating_cf = _lookup_account(cf_map, ACCOUNT_MAP['operating_cf'])
     investing_cf = _lookup_account(cf_map, ACCOUNT_MAP['investing_cf'])
     financing_cf = _lookup_account(cf_map, ACCOUNT_MAP['financing_cf'])
-    # CapEx: XBRL account_id 매칭 우선, 실패 시 한국어 계정명 키워드로 폴백.
-    # CF의 "유형자산의취득"/"무형자산의취득" 등은 회사마다 표준 XBRL 태그
-    # 대신 자체 dart_ 태그를 쓰는 경우가 많아 account_id만으로는 자주 0이 됨
-    # (D&A와 동일한 문제) — KOREAN_NAME_KEYWORDS 폴백과 _sum_by_keyword
-    # 최종 폴백(투자활동현금흐름 내 여러 유형/무형자산 취득 계정을 모두 합산)을
-    # 추가해 실제로 값을 잡아내도록 한다.
-    capex_raw = _lookup_account(cf_map, ACCOUNT_MAP['capex'],
-                                 KOREAN_NAME_KEYWORDS['capex'], CAPEX_EXCLUDE_KEYWORDS)
-    if capex_raw == 0:
-        capex_raw = _sum_by_keyword(cf_items, None, KOREAN_NAME_KEYWORDS['capex'],
-                                     CAPEX_EXCLUDE_KEYWORDS)
+    # CapEx = 현금흐름표(투자활동) 내 "유형자산의 취득" + "무형자산의 취득"
+    # 금액의 합. 두 항목이 별도 줄로 같이 잡히는 경우가 많으므로(예: 유형자산
+    # 취득 + 무형자산 취득을 따로 공시), 첫 매칭 한 건만 반환하는
+    # _lookup_account 대신 _sum_by_keyword로 두 계정을 전부 더한다.
+    # account_id(XBRL 표준 태그) 매칭을 우선 시도하고, 0이면 한국어 계정명
+    # 키워드 합산으로 폴백한다.
+    capex_raw = _lookup_account(cf_map, ACCOUNT_MAP['capex'])
+    capex_kw_sum = _sum_by_keyword(cf_items, None, KOREAN_NAME_KEYWORDS['capex'],
+                                    CAPEX_EXCLUDE_KEYWORDS)
+    if capex_kw_sum != 0:
+        capex_raw = capex_kw_sum
     capex = abs(capex_raw)  # CapEx is typically negative in CF
 
     def _raw_rows(raw_items):
@@ -792,10 +795,14 @@ _XBRL_DA_ROU_TAG_PATTERNS = [
 _XBRL_DA_EXCLUDE_TAG_PATTERNS = [
     'accumulated', 'disposal', 'impairment', 'revaluation', 'increasedecrease',
 ]
+# CapEx = 유형자산 취득 + 무형자산 취득 (둘 다 매칭해 합산)
 _XBRL_CAPEX_TAG_PATTERNS = [
     'purchaseofpropertyplantandequipment',
     'acquisitionofpropertyplantandequipment',
     'paymentsforpropertyplantandequipment',
+    'purchaseofintangibleassets',
+    'acquisitionofintangibleassets',
+    'paymentsforintangibleassets',
 ]
 
 
