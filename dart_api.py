@@ -683,6 +683,10 @@ def get_financial_statements(corp_code, year, api_key, report_type='11011', fs_d
                     except Exception:
                         xbrl_result = None
                     if xbrl_result:
+                        # 성공/실패 여부와 무관하게 진단 정보는 항상 남겨서
+                        # app.py 디버그 expander에서 어느 단계에서 막혔는지
+                        # (rcept_no 못 찾음/zip 아님/태그 없음 등) 바로 보이게 함
+                        result['_xbrl_debug'] = xbrl_result.get('_debug')
                         if need_da and xbrl_result.get('da'):
                             cf['da'] = xbrl_result['da']
                             is_['da'] = is_.get('da') or xbrl_result['da']
@@ -894,18 +898,24 @@ def get_da_capex_from_xbrl_notes(corp_code, year, api_key, report_type='11011'):
       3) 태그 로컬명에 depreciation/amortisation이 들어간 모든 duration
          fact, 그리고 capex 관련 표준 태그를 찾아 합산한다.
 
-    실패 시(rcept_no 없음/zip 깨짐/파싱 실패/매칭 실패 등) 예외를 삼키고
-    None을 반환한다 — 이 함수가 실패해도 기존 폴백 흐름(디버그 expander
-    표시)이 그대로 동작해야 하므로 호출자에게 예외를 전달하지 않는다.
+    실패 시(rcept_no 없음/zip 깨짐/파싱 실패/매칭 실패 등) None을 반환해
+    기존 폴백 흐름(디버그 expander 표시)이 그대로 동작하게 한다. 다만 *어느
+    단계에서* 실패했는지는 '_debug' 키에 남겨, 화면(app.py)에서 사용자가
+    바로 확인할 수 있게 한다 — 실 운영 중 원인 진단이 막혀 있던 문제를
+    풀기 위함 (rcept_no 못 찾음 / zip 아님 / xbrl 안에 태그 없음 등 구분).
     """
+    debug = {'rcept_no': None, 'xbrl_filenames': [], 'stage': None, 'detail': None}
     try:
         key = get_dart_api_key(api_key)
         if not key:
-            return None
+            debug['stage'] = 'no_api_key'
+            return {'da': None, 'capex': None, 'source': None, '_debug': debug}
 
         rcept_no = _find_rcept_no(corp_code, year, key, report_type)
+        debug['rcept_no'] = rcept_no
         if not rcept_no:
-            return None
+            debug['stage'] = 'rcept_no_not_found'
+            return {'da': None, 'capex': None, 'source': None, '_debug': debug}
 
         url = f"{BASE_URL}/fnlttXbrl.xml"
         params = {
@@ -917,29 +927,46 @@ def get_da_capex_from_xbrl_notes(corp_code, year, api_key, report_type='11011'):
         resp.raise_for_status()
 
         # DART는 오류 시에도 200 + zip이 아닌 XML 오류 메시지를 줄 수 있으므로
-        # zip으로 열 수 없으면 그 자체로 실패 처리
+        # zip으로 열 수 없으면 그 자체로 실패 처리. 이 경우 응답 본문(에러
+        # 메시지)을 같이 남겨 어떤 오류인지 바로 보이게 한다.
         try:
             zf = zipfile.ZipFile(io.BytesIO(resp.content))
         except zipfile.BadZipFile:
-            return None
+            debug['stage'] = 'not_a_zip'
+            debug['detail'] = resp.content[:500].decode('utf-8', errors='replace')
+            return {'da': None, 'capex': None, 'source': None, '_debug': debug}
 
         xbrl_filenames = [n for n in zf.namelist() if n.lower().endswith(('.xbrl', '.xml'))]
+        debug['xbrl_filenames'] = xbrl_filenames
         if not xbrl_filenames:
-            return None
+            debug['stage'] = 'zip_has_no_xbrl_xml'
+            debug['detail'] = zf.namelist()
+            return {'da': None, 'capex': None, 'source': None, '_debug': debug}
 
         da_total = 0.0
         capex_total = 0.0
         found_any = False
+        tag_samples = []
 
         for fname in xbrl_filenames:
             try:
                 content = zf.read(fname)
                 root = ET.fromstring(content)
-            except (ET.ParseError, KeyError):
+            except (ET.ParseError, KeyError) as e:
+                debug.setdefault('parse_errors', []).append(f"{fname}: {e}")
                 continue
+
+            # 진단용: 이 인스턴스 문서에 실제로 어떤 로컬 태그들이 있는지
+            # 일부 샘플을 남겨, depreciation/amortisation/capex 패턴과 전혀
+            # 다른 명명을 쓰는 필러(예: dart: 확장 태그)를 식별할 수 있게 함
+            for el in root.iter():
+                lt = _local_tag(el.tag)
+                if lt not in ('context', 'unit') and lt not in tag_samples:
+                    tag_samples.append(lt)
 
             duration_ctx = _xbrl_build_duration_contexts(root)
             if not duration_ctx:
+                debug.setdefault('no_duration_ctx_files', []).append(fname)
                 continue
 
             da_val = _xbrl_extract_facts(
@@ -955,19 +982,27 @@ def get_da_capex_from_xbrl_notes(corp_code, year, api_key, report_type='11011'):
                 capex_total = capex_val
                 found_any = True
 
+        debug['tag_sample'] = [t for t in tag_samples
+                                if any(k in t.lower() for k in
+                                       ('depreciat', 'amortis', 'amortiz', 'propertyplant'))][:30]
+
         if not found_any:
-            return None
+            debug['stage'] = 'no_matching_tags'
+            return {'da': None, 'capex': None, 'source': None, '_debug': debug}
 
         return {
             'da': da_total if da_total > 0 else None,
             'capex': capex_total if capex_total > 0 else None,
             'source': 'xbrl_note',
+            '_debug': debug,
         }
-    except Exception:
+    except Exception as e:
         # XBRL 조회/파싱은 실패 경로가 매우 다양함 (네트워크, 잘못된 rcept_no,
-        # 예상과 다른 XML 구조 등) — 어떤 이유로든 실패하면 조용히 None을
-        # 반환해 기존 폴백(디버그 expander)이 그대로 동작하게 한다.
-        return None
+        # 예상과 다른 XML 구조 등) — 호출자에게 예외를 전달하지 않고 어떤
+        # 예외였는지만 _debug에 남긴다.
+        debug['stage'] = 'exception'
+        debug['detail'] = f"{type(e).__name__}: {e}"
+        return {'da': None, 'capex': None, 'source': None, '_debug': debug}
 
 
 def get_business_segments(corp_code, year, api_key=None):

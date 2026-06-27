@@ -128,7 +128,7 @@ def extract_historical_summary(financial_data: dict, years: list) -> dict:
         # 순차입금 (IBD - 현금성자산)
         'ibd': {}, 'cash_equivalents': {}, 'net_debt': {},
         # D&A를 XBRL 주석(유형자산 노트)에서 찾아낸 연도 표시용
-        'da_source': {},
+        'da_source': {}, 'xbrl_debug': {},
     }
     for yr in years:
         yr_data = financial_data.get(str(yr), {})
@@ -138,6 +138,7 @@ def extract_historical_summary(financial_data: dict, years: list) -> dict:
         bs_data = yr_data.get('balance_sheet', {})
         cf_data = yr_data.get('cash_flow', {})
         summary['da_source'][yr] = yr_data.get('_da_source')
+        summary['xbrl_debug'][yr] = yr_data.get('_xbrl_debug')
 
         rev = is_data.get('revenue', 0)
         cogs = is_data.get('cogs', 0)
@@ -827,6 +828,19 @@ elif page == 'DCF 가정 입력':
                     st.caption("해당 연도의 현금흐름표/손익계산서 원본 항목 자체가 비어있습니다 (데이터 조회 실패 가능성).")
                 else:
                     st.dataframe(pd.DataFrame(debug_items), use_container_width=True)
+
+                xbrl_dbg = hist.get('xbrl_debug', {}).get(yr)
+                if xbrl_dbg:
+                    st.caption(f"XBRL 주석 폴백 진단 — 단계: `{xbrl_dbg.get('stage')}`")
+                    if xbrl_dbg.get('rcept_no'):
+                        st.caption(f"접수번호(rcept_no): {xbrl_dbg['rcept_no']}")
+                    if xbrl_dbg.get('detail'):
+                        st.code(str(xbrl_dbg['detail'])[:1000])
+                    if xbrl_dbg.get('tag_sample'):
+                        st.caption("XBRL 내 감가상각/상각/유형자산 관련 태그명 후보:")
+                        st.code("\n".join(xbrl_dbg['tag_sample']))
+                    elif xbrl_dbg.get('stage') == 'no_matching_tags':
+                        st.caption("XBRL 문서 자체에 depreciation/amortisation/propertyplant 패턴을 포함한 태그가 전혀 없습니다 — 이 회사 필링은 주석을 XBRL로 태깅하지 않았을 가능성이 높습니다.")
 
     st.markdown("---")
 
