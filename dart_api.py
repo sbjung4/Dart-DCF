@@ -2,6 +2,7 @@ import os
 import io
 import zipfile
 import requests
+from datetime import datetime
 import xml.etree.ElementTree as ET
 import pandas as pd
 import numpy as np
@@ -822,17 +823,21 @@ def _local_tag(tag):
     return tag
 
 
-def _xbrl_build_duration_contexts(root):
+def _xbrl_build_duration_contexts(root, target_year=None):
     """<context> 엘리먼트 중 기간(duration)을 나타내는 contextRef id 집합을 만든다.
     instant(시점) 컨텍스트는 재무상태표용이라 D&A/CapEx(둘 다 기간 항목)에는
     해당하지 않으므로 제외한다.
 
     동시에 각 duration context의 (startDate, endDate)를 보관해, 사업연도
     전체(약 365일)를 커버하는 컨텍스트만 추리는 데 사용한다 (분기/반기
-    누적이 아닌 값이 섞여 들어오는 것을 막기 위함 — 다만 1차 구현에서는
-    "duration이면서 dimension(segment)이 없는 것"까지만 걸러내고, 정밀한
-    날짜 길이 검증은 보수적으로 통과시킨다. 길이 미달이어도 완전히 버리기보다
-    참고용으로 남겨, 상위 호출자가 결과를 받고 _sum 정도의 안전장치만 적용).
+    누적이 아닌 값이 섞여 들어오는 것을 막기 위함).
+
+    target_year가 주어지면, IFRS 연차 보고서 XBRL 인스턴스 문서 한 개에는
+    당기뿐 아니라 비교공시되는 전기/전전기 duration context도 함께 들어있는
+    것이 보통이므로, endDate의 연도가 target_year와 다르거나 기간 길이가
+    약 330~380일(연간) 범위를 벗어나는 context는 제외한다 — 그러지 않으면
+    같은 axis 아래 여러 회계연도 facts가 함께 합산되어 D&A가 몇 배로
+    부풀려지는 문제가 생긴다.
     """
     duration_ctx = {}
     for ctx in root.iter():
@@ -867,6 +872,17 @@ def _xbrl_build_duration_contexts(root):
                                 if dim:
                                     axes.add(dim)
         if period is not None:
+            if target_year is not None:
+                start_str, end_str = period
+                try:
+                    start_d = datetime.strptime(start_str[:10], '%Y-%m-%d')
+                    end_d = datetime.strptime(end_str[:10], '%Y-%m-%d')
+                except ValueError:
+                    continue
+                if end_d.year != target_year:
+                    continue
+                if not (330 <= (end_d - start_d).days <= 380):
+                    continue
             duration_ctx[ctx_id] = {
                 'period': period,
                 'has_segment': has_segment,
@@ -1017,7 +1033,7 @@ def get_da_capex_from_xbrl_notes(corp_code, year, api_key, report_type='11011'):
                 if lt not in ('context', 'unit') and lt not in tag_samples:
                     tag_samples.append(lt)
 
-            duration_ctx = _xbrl_build_duration_contexts(root)
+            duration_ctx = _xbrl_build_duration_contexts(root, target_year=year)
             if not duration_ctx:
                 debug.setdefault('no_duration_ctx_files', []).append(fname)
                 continue
