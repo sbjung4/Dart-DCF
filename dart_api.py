@@ -330,6 +330,11 @@ CAPEX_EXCLUDE_KEYWORDS = ['처분', '관계기업', '종속기업', '투자자�
 # 감가상각비/상각비와 무관하게 "상각"이라는 단어가 들어가는 회계/금융 계정
 # (사채할인발행차금상각, 상각후원가 등) — D&A 키워드 매칭 시 오염을 막기 위해 제외
 DA_EXCLUDE_KEYWORDS = ['사채', '차입금', '할인발행차금', '상각후원가', '리스부채이자']
+# da_ppe 키워드 '감가상각비'는 "사용권자산감가상각비" 계정명의 부분문자열이기도
+# 해서, ROU 전용 계정이 PPE 카테고리로 잘못 잡혀 da_rou와 중복 합산되는 문제가
+# 있었다 (예: 삼성전자 D&A가 실제보다 부풀려짐) — da_ppe 매칭에서는 사용권 관련
+# 계정을 명시적으로 제외한다.
+DA_PPE_EXCLUDE_KEYWORDS = DA_EXCLUDE_KEYWORDS + ['사용권']
 
 # 순차입금(IBD) 합산 시 사채/차입금의 contra계정(할인발행차금, 전환권조정 등)이나
 # 이자/평가손익 계정이 오매칭되는 것을 막기 위한 제외 키워드
@@ -444,7 +449,7 @@ def _extract_financials_from_items(items):
     # D&A는 현금흐름표의 "영업활동현금흐름 - 현금의 유출이 없는 비용 등의 가산"
     # 항목에서 가져오는 것이 가장 정확함. 유형자산감가상각비, 개발비상각,
     # 기타무형자산상각비, 사용권자산상각비를 모두 더해서 구한다.
-    da_ppe = _lookup_account(cf_map, ACCOUNT_MAP['da_ppe'], KOREAN_NAME_KEYWORDS['da_ppe'], DA_EXCLUDE_KEYWORDS)
+    da_ppe = _lookup_account(cf_map, ACCOUNT_MAP['da_ppe'], KOREAN_NAME_KEYWORDS['da_ppe'], DA_PPE_EXCLUDE_KEYWORDS)
     da_intangible = _lookup_account(cf_map, ACCOUNT_MAP['da_intangible'], KOREAN_NAME_KEYWORDS['da_intangible'], DA_EXCLUDE_KEYWORDS)
     da_rou = _lookup_account(cf_map, ACCOUNT_MAP['da_rou'], KOREAN_NAME_KEYWORDS['da_rou'], DA_EXCLUDE_KEYWORDS)
     da_components = da_ppe + da_intangible + da_rou
@@ -495,18 +500,22 @@ def _extract_financials_from_items(items):
     accounts_payable = _lookup_account(bs_map, ACCOUNT_MAP['accounts_payable'], KOREAN_NAME_KEYWORDS['accounts_payable'])
     shares_outstanding = _lookup_account(bs_map, ACCOUNT_MAP['shares_outstanding'], KOREAN_NAME_KEYWORDS['shares_outstanding'])
 
-    # Total debt: try borrowings first, then sum short+long term
-    total_debt = _lookup_account(bs_map, ACCOUNT_MAP['total_borrowings'])
-    if total_debt == 0:
-        short_term = _lookup_account(bs_map, ACCOUNT_MAP['short_term_borrowings'])
-        long_term = _lookup_account(bs_map, ACCOUNT_MAP['long_term_borrowings'])
-        total_debt = short_term + long_term
-
     # 순차입금(Net Debt) = IBD(이자부부채) - 현금성자산
     # IBD: 단기차입금, 유동성장기부채, 장기차입금, 금융리스부채, 전환사채(CB),
     #      교환사채(EB), 신주인수권부사채(BW), 일반 사채 등을 모두 합산 (서로
     #      다른 계정이 동시에 존재할 수 있으므로 _sum_by_keyword로 전부 더함)
     ibd = _sum_by_keyword(bs_items, 'BS', KOREAN_NAME_KEYWORDS['ibd'], IBD_EXCLUDE_KEYWORDS)
+
+    # Total debt: 표준 XBRL 계정(account_id)만으로 찾으면, 많은 회사가
+    # 비표준 dart_ 태그를 써서 0이 되는 경우가 많음(삼성전자 등) — account_id
+    # 매칭이 실패하면 위에서 이미 키워드로 전부 합산한 ibd를 그대로 사용한다.
+    total_debt = _lookup_account(bs_map, ACCOUNT_MAP['total_borrowings'])
+    if total_debt == 0:
+        short_term = _lookup_account(bs_map, ACCOUNT_MAP['short_term_borrowings'])
+        long_term = _lookup_account(bs_map, ACCOUNT_MAP['long_term_borrowings'])
+        total_debt = short_term + long_term
+    if total_debt == 0:
+        total_debt = ibd
     # 현금성자산: 현금및현금성자산 + 단기금융상품(단기예금 등)
     cash_equivalents = _sum_by_keyword(bs_items, 'BS', KOREAN_NAME_KEYWORDS['cash_equivalents'], CASH_EQUIV_EXCLUDE_KEYWORDS)
     if cash_equivalents == 0:
