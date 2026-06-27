@@ -840,6 +840,15 @@ elif page == 'DCF 가정 입력':
             f"ℹ️ {', '.join(str(y) for y in xbrl_note_years)}년 D&A는 현금흐름표 본문에 "
             "없어 XBRL 유형자산 주석(당기증가(상각) 등)에서 추출한 값입니다."
         )
+        for yr in xbrl_note_years:
+            xbrl_dbg = hist.get('xbrl_debug', {}).get(yr)
+            if xbrl_dbg and xbrl_dbg.get('da_breakdown'):
+                b = xbrl_dbg['da_breakdown']
+                st.caption(
+                    f"  · {yr}년 XBRL 구성: 감가상각비(유형자산) {b.get('ppe', 0):,.0f} + "
+                    f"무형자산상각비 {b.get('intangible', 0):,.0f} + "
+                    f"사용권자산상각비 {b.get('rou', 0):,.0f}"
+                )
 
     zero_da_years = [yr for yr in hist_years if hist['da'].get(yr, 0) == 0]
     if zero_da_years:
