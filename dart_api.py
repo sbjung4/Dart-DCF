@@ -316,7 +316,13 @@ KOREAN_NAME_KEYWORDS = {
     'ibd': ['단기차입금', '유동성장기부채', '유동성장기차입금', '장기차입금',
             '리스부채', '금융리스부채', '전환사채', '신주인수권부사채', '교환사채', '사채'],
     'cash_equivalents': ['현금및현금성자산', '단기금융상품', '단기예금'],
+    'capex': ['유형자산의취득', '유형자산취득', '유형자산의 취득', '유형자산의증가',
+              '무형자산의취득', '무형자산취득', '무형자산의 취득'],
 }
+
+# CapEx 키워드 매칭 시 "처분"(자산 매각, 현금 유입)이나 투자자산/관계기업
+# 관련 취득(설비투자가 아닌 지분투자)이 잘못 섞이는 것을 막기 위한 제외 키워드
+CAPEX_EXCLUDE_KEYWORDS = ['처분', '관계기업', '종속기업', '투자자산', '리스']
 
 # 감가상각비/상각비와 무관하게 "상각"이라는 단어가 들어가는 회계/금융 계정
 # (사채할인발행차금상각, 상각후원가 등) — D&A 키워드 매칭 시 오염을 막기 위해 제외
@@ -507,7 +513,17 @@ def _extract_financials_from_items(items):
     operating_cf = _lookup_account(cf_map, ACCOUNT_MAP['operating_cf'])
     investing_cf = _lookup_account(cf_map, ACCOUNT_MAP['investing_cf'])
     financing_cf = _lookup_account(cf_map, ACCOUNT_MAP['financing_cf'])
-    capex_raw = _lookup_account(cf_map, ACCOUNT_MAP['capex'])
+    # CapEx: XBRL account_id 매칭 우선, 실패 시 한국어 계정명 키워드로 폴백.
+    # CF의 "유형자산의취득"/"무형자산의취득" 등은 회사마다 표준 XBRL 태그
+    # 대신 자체 dart_ 태그를 쓰는 경우가 많아 account_id만으로는 자주 0이 됨
+    # (D&A와 동일한 문제) — KOREAN_NAME_KEYWORDS 폴백과 _sum_by_keyword
+    # 최종 폴백(투자활동현금흐름 내 여러 유형/무형자산 취득 계정을 모두 합산)을
+    # 추가해 실제로 값을 잡아내도록 한다.
+    capex_raw = _lookup_account(cf_map, ACCOUNT_MAP['capex'],
+                                 KOREAN_NAME_KEYWORDS['capex'], CAPEX_EXCLUDE_KEYWORDS)
+    if capex_raw == 0:
+        capex_raw = _sum_by_keyword(cf_items, None, KOREAN_NAME_KEYWORDS['capex'],
+                                     CAPEX_EXCLUDE_KEYWORDS)
     capex = abs(capex_raw)  # CapEx is typically negative in CF
 
     def _raw_rows(raw_items):

@@ -470,6 +470,17 @@ def build_excel_workbook(company_name, hist, asmp, fcff_df, pv_fcff_df,
                 return row_map[nm]
         return None
 
+    def _find_rows(row_map, names, keywords, exclude_keywords=None):
+        """키워드를 포함하는 모든 계정명의 행 번호를 찾는다 (CapEx처럼 유형/무형
+        자산 취득이 별도 행으로 나뉘어 있어 합산이 필요한 경우용)."""
+        rows = []
+        for nm in names:
+            if exclude_keywords and any(kw in nm for kw in exclude_keywords):
+                continue
+            if any(kw in nm for kw in keywords):
+                rows.append(row_map[nm])
+        return rows
+
     bs_raw_rows, bs_names = raw_hist_sheet("BS", "bs", fallback_rows=[
         ("총자산", "total_assets"), ("총자본", "total_equity"), ("현금", "cash"),
         ("IBD(이자부부채)", "ibd"), ("순차입금", "net_debt"),
@@ -495,7 +506,10 @@ def build_excel_workbook(company_name, hist, asmp, fcff_df, pv_fcff_df,
         'sga': _find_row(is_raw_rows, is_names, ['판매비와관리비']) or is_raw_rows.get('판매비와관리비'),
     }
     cs_row = {
-        'da': _find_row(cs_raw_rows, cs_names, ['감가상각비']) or cs_raw_rows.get('D&A'),
+        # D&A는 유형자산/무형자산/사용권자산 감가상각·상각비가 별도 행으로
+        # 나뉘어 있는 경우가 많으므로(다트 raw 현금흐름표 기준) 전부 찾아 합산.
+        'da': (_find_rows(cs_raw_rows, cs_names, ['상각비'], exclude_keywords=['차입금', '사채', '할인발행차금'])
+               or ([cs_raw_rows['D&A']] if 'D&A' in cs_raw_rows else None)),
     }
 
     # ────────────────────────────────────────────────────────────────
@@ -516,11 +530,24 @@ def build_excel_workbook(company_name, hist, asmp, fcff_df, pv_fcff_df,
     def _style_header_row(ws, row=2):
         _full_year_header(ws, row, 3, hist_years, proj_years)
 
+    def _src_ref(sheet_name, col, src_row):
+        """src_row가 리스트면 여러 행을 합산하는 식(`(A!c1+A!c2)`)을, 단일
+        값이면 그냥 `A!c1`을 돌려준다. cs_row['da']처럼 단일/리스트 둘 다
+        올 수 있는 값을 일반 셀 참조 문자열로 만들 때 쓴다."""
+        src_rows = src_row if isinstance(src_row, (list, tuple)) else [src_row]
+        terms = "+".join(f"{sheet_name}!{col}{rr_}" for rr_ in src_rows)
+        return f"({terms})" if len(src_rows) > 1 else terms
+
     def _hist_link_row(ws, row, sheet_name, src_row, sign="+", bold=False, fmt=NUM_FMT):
-        """과거 열에는 BS/IS/CS 시트의 해당 행을 그대로 수식으로 참조한다."""
+        """과거 열에는 BS/IS/CS 시트의 해당 행을 그대로 수식으로 참조한다.
+        src_row가 리스트면 여러 행(예: 유형/무형/사용권자산 감가상각비가 별도
+        행으로 나뉜 경우)을 합산하는 수식을 만든다."""
+        src_rows = src_row if isinstance(src_row, (list, tuple)) else [src_row]
         for i in range(H):
-            c = ws.cell(row=row, column=3 + i,
-                        value=f"={sign}{sheet_name}!{hist_col(i)}{src_row}")
+            col = hist_col(i)
+            terms = "+".join(f"{sheet_name}!{col}{rr_}" for rr_ in src_rows)
+            value = f"={sign}({terms})" if len(src_rows) > 1 else f"={sign}{terms}"
+            c = ws.cell(row=row, column=3 + i, value=value)
             c.number_format = fmt
             if bold:
                 c.font = BOLD
@@ -629,7 +656,7 @@ def build_excel_workbook(company_name, hist, asmp, fcff_df, pv_fcff_df,
         elif da_method == 'fixed':
             ws_dc.cell(row=8, column=proj_col0 + i, value=f"={col}7").number_format = NUM_FMT
         else:
-            prev = f"CS!{hist_col(H-1)}{cs_row['da']}" if i == 0 else f"{proj_col(i-1)}8"
+            prev = _src_ref("CS", hist_col(H-1), cs_row['da']) if i == 0 else f"{proj_col(i-1)}8"
             ws_dc.cell(row=8, column=proj_col0 + i, value=f"={prev}*(1+{col}7)").number_format = NUM_FMT
     da_row_out = 8
 
@@ -654,16 +681,21 @@ def build_excel_workbook(company_name, hist, asmp, fcff_df, pv_fcff_df,
     for i in range(n):
         col = proj_col(i)
         ws_dc.cell(row=15, column=proj_col0 + i, value=f"={col}12+{col}14").number_format = NUM_FMT
-    # 과거 CapEx: CS 현금흐름표의 "유형자산의취득"(투자활동현금흐름 내)을
-    # 찾아 연결한다. 정확히 일치하는 계정이 없으면 빈칸으로 두고 주석만 남김.
-    capex_hist_row = _find_row(cs_raw_rows, cs_names, ['유형자산의취득', '유형자산 취득'])
-    if capex_hist_row:
+    # 과거 CapEx: CS 현금흐름표의 "유형자산의취득"/"무형자산의취득"(투자활동
+    # 현금흐름 내) 항목을 전부 찾아 합산한다 — 유형/무형자산 취득이 별도 행으로
+    # 나뉘어 있는 경우가 많아 한 줄만 찾으면 누락되므로 _find_rows로 전부 합산.
+    # 정확히 일치하는 계정이 없으면 빈칸으로 둔다(가짜 값을 만들지 않음).
+    capex_hist_rows = _find_rows(cs_raw_rows, cs_names,
+                                  ['유형자산의취득', '유형자산 취득', '유형자산의증가',
+                                   '무형자산의취득', '무형자산 취득'],
+                                  exclude_keywords=['처분'])
+    if capex_hist_rows:
         for i in range(H):
-            c = ws_dc.cell(row=15, column=3 + i, value=f"=-CS!{hist_col(i)}{capex_hist_row}")
+            col = hist_col(i)
+            terms = "+".join(f"CS!{col}{rr_}" for rr_ in capex_hist_rows)
+            c = ws_dc.cell(row=15, column=3 + i, value=f"=-({terms})")
             c.number_format = NUM_FMT
             c.font = BOLD
-    else:
-        ws_dc.cell(row=15, column=2).comment = None  # TODO: CAPEX 과거값 — CS에서 유형자산취득 계정을 찾지 못함
     _col_widths(ws_dc, H + n + 1)
     capex_row_out = 15
 
@@ -943,7 +975,7 @@ def build_excel_workbook(company_name, hist, asmp, fcff_df, pv_fcff_df,
         ws_d.cell(row=10, column=3+i, value=f"={col}8+{col}9").number_format = NUM_FMT
         ws_d.cell(row=10, column=3+i).font = BOLD
         if cs_row.get('da'):
-            ws_d.cell(row=12, column=3+i, value=f"=+CS!{col}{cs_row['da']}").number_format = NUM_FMT
+            ws_d.cell(row=12, column=3+i, value=f"=+{_src_ref('CS', col, cs_row['da'])}").number_format = NUM_FMT
 
     for i in range(n):
         col = proj_col(i)
