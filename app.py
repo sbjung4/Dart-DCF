@@ -82,7 +82,7 @@ def fmt_억(value):
         return "N/A"
     divisor = UNIT_DIVISORS[current_unit()]
     converted = value / divisor
-    return f"{converted:,.1f}"
+    return f"{converted:,.0f}"
 
 def safe_div(a, b, default=0.0):
     try:
@@ -95,6 +95,13 @@ def safe_div(a, b, default=0.0):
 def fmt_df(df):
     """DataFrame의 숫자 셀을 선택된 표시 단위로 포맷 (pandas 2.1+ 호환)"""
     return df.map(lambda x: fmt_억(x) if isinstance(x, (int, float)) and x != 0 else ('-' if x == 0 else x))
+
+def show_table(df, **kwargs):
+    """모든 표를 우측 정렬해서 표시 (DSO/DIO/DPO 등 소수점 컬럼도 정렬만 적용)."""
+    kwargs.setdefault('use_container_width', True)
+    styler = df.style.set_properties(**{'text-align': 'right'})
+    styler = styler.set_table_styles([{'selector': 'th', 'props': [('text-align', 'right')]}])
+    st.dataframe(styler, **kwargs)
 
 def calc_korea_corp_tax_rate(taxable_income_억: float) -> float:
     """
@@ -222,11 +229,13 @@ def make_hist_pct_table(hist, metric, years, rev_key='revenue'):
     """
     rows = {}
     sorted_yrs = sorted(years)
+    u = current_unit()
+    div = UNIT_DIVISORS[u]
     for yr in sorted_yrs:
         val = hist[metric].get(yr, 0)
         rev = hist[rev_key].get(yr, 1) or 1
         rows[str(yr)] = {
-            '금액(억원)': f"{val/1e8:,.1f}",
+            f'금액({u})': f"{val/div:,.0f}",
             '매출 대비(%)': f"{val/rev*100:.1f}%",
         }
     return pd.DataFrame(rows)
@@ -275,12 +284,6 @@ if page == '기업 검색':
     if not st.session_state.api_key:
         st.warning("먼저 사이드바에서 DART API Key를 입력해주세요.")
 
-    st.selectbox(
-        "금액 표시 단위", list(UNIT_DIVISORS.keys()),
-        key='amount_unit',
-        help="이후 모든 화면(재무제표 확인, DCF 가정 입력, DCF 결과)의 금액 표시에 적용됩니다.",
-    )
-
     col1, col2 = st.columns([3, 1])
     with col1:
         keyword = st.text_input("기업명 또는 종목코드", placeholder="예: 삼성전자, 005930")
@@ -316,7 +319,7 @@ if page == '기업 검색':
         is_listed = bool(selected_co.get('stock_code', '').strip())
 
         st.divider()
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4, col5 = st.columns(5)
 
         cur_year = datetime.datetime.now().year
         year_options = list(range(cur_year, 2018, -1))
@@ -348,6 +351,13 @@ if page == '기업 검색':
             fs_div = "CFS" if "CFS" in fs_div_label else "OFS"
 
         with col4:
+            st.segmented_control(
+                "금액 표시 단위", list(UNIT_DIVISORS.keys()),
+                key='amount_unit',
+                help="이후 모든 화면(재무제표 확인, DCF 가정 입력, DCF 결과)의 금액 표시에 적용됩니다.",
+            )
+
+        with col5:
             st.write("")
             st.write("")
             fetch_btn = st.button("📥 재무제표 불러오기", use_container_width=True)
@@ -538,7 +548,11 @@ elif page == '재무제표 확인':
             'ROE': f"{safe_div(ni, eq)*100:.1f}%",
             'ROA': f"{safe_div(ni, assets)*100:.1f}%",
         }
-    st.dataframe(pd.DataFrame(is_display), use_container_width=True)
+    is_df = pd.DataFrame(is_display).reset_index().rename(columns={'index': '항목'})
+    show_table(
+        is_df, use_container_width=True, hide_index=True,
+        column_config={'항목': st.column_config.Column(width='large')},
+    )
 
     # 재무상태표 (연도를 열로 표시, 오름차순)
     st.markdown(f"#### 재무상태 (단위: {u})")
@@ -551,7 +565,7 @@ elif page == '재무제표 확인':
         '순차입금': {yr: hist['total_debt'].get(yr,0) - hist['cash'].get(yr,0) for yr in years},
     }
     bs_df = pd.DataFrame({str(yr): {k: v.get(yr, 0) for k, v in bs_rows.items()} for yr in years})
-    st.dataframe(fmt_df(bs_df), use_container_width=True)
+    show_table(fmt_df(bs_df), use_container_width=True)
 
     # 현금흐름 (연도를 열로 표시, 오름차순)
     st.markdown(f"#### 현금흐름 (단위: {u})")
@@ -563,7 +577,7 @@ elif page == '재무제표 확인':
         '잉여현금흐름(FCF)': {yr: hist['operating_cf'].get(yr,0) - hist['capex'].get(yr,0) for yr in years},
     }
     cf_df = pd.DataFrame({str(yr): {k: v.get(yr, 0) for k, v in cf_rows.items()} for yr in years})
-    st.dataframe(fmt_df(cf_df), use_container_width=True)
+    show_table(fmt_df(cf_df), use_container_width=True)
 
     # 운전자본 현황
     if any(hist['accounts_receivable'].get(yr, 0) > 0 for yr in years):
@@ -585,7 +599,7 @@ elif page == '재무제표 확인':
                 'DIO(일)': f"{hist['dio'].get(yr,0):.1f}",
                 'DPO(일)': f"{hist['dpo'].get(yr,0):.1f}",
             }
-        st.dataframe(pd.DataFrame(nwc_detail), use_container_width=True)
+        show_table(pd.DataFrame(nwc_detail), use_container_width=True)
         st.caption("DSO=매출채권/매출액×365 | DIO=재고/매출원가×365 | DPO=매입채무/매출원가×365")
 
     # 추이 차트
@@ -626,23 +640,25 @@ elif page == 'DCF 가정 입력':
     n = int(asmp.get('projection_years', 5))
     hist_years = sorted([yr for yr in hist['revenue'].keys()])  # 과거 3개년, 오름차순
     proj_years = [base_year + i + 1 for i in range(n)]          # 예측 연도 (실제 연도)
+    u = current_unit()
+    div = UNIT_DIVISORS[u]
 
     # ── 1. 매출액 ────────────────────────────────────────────────────────────
     st.subheader("1. 매출액 가정")
 
     # 과거 3개년 매출 현황
-    st.markdown("**📊 과거 실적 (억원)**")
+    st.markdown(f"**📊 과거 실적 ({u})**")
     hist_rev_data = {}
     prev_rev = None
     for yr in hist_years:
         rev = hist['revenue'].get(yr, 0)
         yoy = safe_div(rev - prev_rev, prev_rev, 0) * 100 if prev_rev else None
         hist_rev_data[str(yr)] = {
-            '매출액(억원)': f"{rev/1e8:,.1f}",
+            f'매출액({u})': f"{rev/div:,.0f}",
             'YoY성장률': f"{yoy:.1f}%" if yoy is not None else "-",
         }
         prev_rev = rev
-    st.dataframe(pd.DataFrame(hist_rev_data), use_container_width=True)
+    show_table(pd.DataFrame(hist_rev_data), use_container_width=True)
 
     rev_method = st.radio("매출액 방법", ['전체 매출 기준', '사업부문별'], horizontal=True,
                           index=0 if asmp.get('revenue_method','total') == 'total' else 1)
@@ -650,7 +666,7 @@ elif page == 'DCF 가정 입력':
 
     if asmp['revenue_method'] == 'total':
         base_rev = asmp.get('revenue_total', {}).get('base', hist['revenue'].get(base_year, 0))
-        st.write(f"기준연도 매출: **{fmt_억(base_rev)}억원** ({base_year})")
+        st.write(f"기준연도 매출: **{fmt_억(base_rev)}{u}** ({base_year})")
 
         prev_growths = asmp.get('revenue_total', {}).get('growth_rates', [5.0]*n)
         cols = st.columns(n)
@@ -663,16 +679,16 @@ elif page == 'DCF 가정 입력':
         asmp['revenue_total'] = {'base': base_rev, 'growth_rates': growth_rates}
 
         # 미리보기: 연도를 열로 배치
-        st.markdown("**📊 매출액 추정 미리보기 (억원)**")
+        st.markdown(f"**📊 매출액 추정 미리보기 ({u})**")
         rev_preview = {}
         v = base_rev
         for i, g in enumerate(growth_rates):
             v = v * (1 + g / 100)
             rev_preview[str(proj_years[i])] = {
-                '매출액(억원)': f"{v/1e8:,.1f}",
+                f'매출액({u})': f"{v/div:,.0f}",
                 'YoY성장률': f"{g:.1f}%",
             }
-        st.dataframe(pd.DataFrame(rev_preview), use_container_width=True)
+        show_table(pd.DataFrame(rev_preview), use_container_width=True)
 
     else:
         segments = asmp.get('revenue_segments', [])
@@ -711,15 +727,15 @@ elif page == 'DCF 가정 입력':
         sga_v = hist['sga'].get(yr, 0)
         ebit_v = hist['ebit'].get(yr, 0)
         cost_hist[str(yr)] = {
-            '매출원가(억원)': f"{cogs_v/1e8:,.1f}",
+            f'매출원가({u})': f"{cogs_v/div:,.0f}",
             '매출원가율(%)': f"{cogs_v/rev*100:.1f}%",
-            '판관비(억원)': f"{sga_v/1e8:,.1f}",
+            f'판관비({u})': f"{sga_v/div:,.0f}",
             '판관비율(%)': f"{sga_v/rev*100:.1f}%",
-            '영업이익(억원)': f"{ebit_v/1e8:,.1f}",
+            f'영업이익({u})': f"{ebit_v/div:,.0f}",
             '영업이익률(%)': f"{ebit_v/rev*100:.1f}%",
         }
     st.markdown("**과거 비용 실적**")
-    st.dataframe(pd.DataFrame(cost_hist), use_container_width=True)
+    show_table(pd.DataFrame(cost_hist), use_container_width=True)
 
     # ── (A) 매출원가 (COGS) ──
     st.markdown("---")
@@ -778,7 +794,7 @@ elif page == 'DCF 가정 입력':
         asmp['sga_growth'] = sga_growth_vals
 
     # 비용 미리보기 (연도를 열로 배치)
-    st.markdown("**📊 비용 추정 미리보기 (억원)**")
+    st.markdown(f"**📊 비용 추정 미리보기 ({u})**")
     cost_preview = {}
     rev_v = base_rev_val
     cogs_v = hist['cogs'].get(base_year, 0)
@@ -798,15 +814,15 @@ elif page == 'DCF 가정 입력':
             sga_v = sga_v * (1 + sg / 100)
         ebit_v = rev_v - cogs_v - sga_v
         cost_preview[yr_label] = {
-            '매출액(억원)': f"{rev_v/1e8:,.1f}",
-            '매출원가(억원)': f"{cogs_v/1e8:,.1f}",
+            f'매출액({u})': f"{rev_v/div:,.0f}",
+            f'매출원가({u})': f"{cogs_v/div:,.0f}",
             'COGS%': f"{safe_div(cogs_v,rev_v)*100:.1f}%",
-            '판관비(억원)': f"{sga_v/1e8:,.1f}",
+            f'판관비({u})': f"{sga_v/div:,.0f}",
             'SGA%': f"{safe_div(sga_v,rev_v)*100:.1f}%",
-            '영업이익(억원)': f"{ebit_v/1e8:,.1f}",
+            f'영업이익({u})': f"{ebit_v/div:,.0f}",
             'EBIT%': f"{safe_div(ebit_v,rev_v)*100:.1f}%",
         }
-    st.dataframe(pd.DataFrame(cost_preview), use_container_width=True)
+    show_table(pd.DataFrame(cost_preview), use_container_width=True)
 
     st.divider()
 
@@ -820,14 +836,14 @@ elif page == 'DCF 가정 입력':
         da_v = hist['da'].get(yr, 0)
         cap_v = hist['capex'].get(yr, 0)
         da_capex_hist[str(yr)] = {
-            'D&A(억원)': f"{da_v/1e8:,.1f}",
+            f'D&A({u})': f"{da_v/div:,.0f}",
             'D&A/매출(%)': f"{da_v/rev*100:.1f}%",
-            'CapEx(억원)': f"{cap_v/1e8:,.1f}",
+            f'CapEx({u})': f"{cap_v/div:,.0f}",
             'CapEx/매출(%)': f"{cap_v/rev*100:.1f}%",
             'CapEx/D&A': f"{safe_div(cap_v,da_v,0):.2f}x",
         }
     st.markdown("**과거 D&A / CapEx 실적**")
-    st.dataframe(pd.DataFrame(da_capex_hist), use_container_width=True)
+    show_table(pd.DataFrame(da_capex_hist), use_container_width=True)
 
     # D&A가 0으로 잡힌 연도가 있으면, DART가 실제로 내려준 CF/IS 계정명을
     # 그대로 보여줘서 어떤 명칭으로 들어오는지 직접 확인할 수 있게 한다.
@@ -950,7 +966,7 @@ elif page == 'DCF 가정 입력':
     asmp['new_invest_capex_fixed'] = new_invest_vals[0] if new_invest_vals else 0  # backward compat
 
     # D&A / CapEx 통합 미리보기 (연도를 열로)
-    st.markdown("**📊 D&A / CapEx 추정 미리보기 (억원)**")
+    st.markdown(f"**📊 D&A / CapEx 추정 미리보기 ({u})**")
     base_da = hist['da'].get(base_year, 0)
     base_capex = hist['capex'].get(base_year, 0)
     da_capex_preview = {}
@@ -977,14 +993,14 @@ elif page == 'DCF 가정 입력':
         new_cap = new_invest_vals[i] if i < len(new_invest_vals) else 0.0
         total_capex = maint_capex + new_cap
         da_capex_preview[yr_label] = {
-            'D&A(억원)': f"{da_v2/1e8:,.1f}",
+            f'D&A({u})': f"{da_v2/div:,.0f}",
             'D&A/매출(%)': f"{safe_div(da_v2,rev_v2)*100:.1f}%",
-            '유지보수CapEx(억원)': f"{maint_capex/1e8:,.1f}",
-            '신규투자CapEx(억원)': f"{new_cap/1e8:,.1f}",
-            '총CapEx(억원)': f"{total_capex/1e8:,.1f}",
+            f'유지보수CapEx({u})': f"{maint_capex/div:,.0f}",
+            f'신규투자CapEx({u})': f"{new_cap/div:,.0f}",
+            f'총CapEx({u})': f"{total_capex/div:,.0f}",
             'CapEx/D&A': f"{safe_div(total_capex,da_v2):.2f}x",
         }
-    st.dataframe(pd.DataFrame(da_capex_preview), use_container_width=True)
+    show_table(pd.DataFrame(da_capex_preview), use_container_width=True)
 
     st.divider()
 
@@ -1007,17 +1023,17 @@ elif page == 'DCF 가정 입력':
             dio = hist['dio'].get(yr, 0)
             dpo = hist['dpo'].get(yr, 0)
             nwc_hist_data[str(yr)] = {
-                '매출액(억원)': f"{rev/1e8:,.1f}",
-                '매출원가(억원)': f"{cogs_yr/1e8:,.1f}",
-                '매출채권(억원)': f"{ar/1e8:,.1f}",
-                '재고자산(억원)': f"{inv/1e8:,.1f}",
-                '매입채무(억원)': f"{ap/1e8:,.1f}",
+                f'매출액({u})': f"{rev/div:,.0f}",
+                f'매출원가({u})': f"{cogs_yr/div:,.0f}",
+                f'매출채권({u})': f"{ar/div:,.0f}",
+                f'재고자산({u})': f"{inv/div:,.0f}",
+                f'매입채무({u})': f"{ap/div:,.0f}",
                 'DSO(일)': f"{dso:.1f}",
                 'DIO(일)': f"{dio:.1f}",
                 'DPO(일)': f"{dpo:.1f}",
                 'CCC(일)': f"{dso+dio-dpo:.1f}",
             }
-        st.dataframe(pd.DataFrame(nwc_hist_data), use_container_width=True)
+        show_table(pd.DataFrame(nwc_hist_data), use_container_width=True)
         st.caption(
             "DSO=매출채권/매출액×365 | DIO=재고자산/매출원가×365 | DPO=매입채무/매출원가×365 | "
             "CCC(현금전환주기)=DSO+DIO-DPO"
@@ -1107,18 +1123,18 @@ elif page == 'DCF 가정 입력':
             delta = nwc_level - prev_nwc
             prev_nwc = nwc_level
             nwc_preview[yr_label] = {
-                '매출채권(억원)': f"{ar_v3/1e8:,.1f}",
-                '재고자산(억원)': f"{inv_v3/1e8:,.1f}",
-                '매입채무(억원)': f"{ap_v3/1e8:,.1f}",
+                f'매출채권({u})': f"{ar_v3/div:,.0f}",
+                f'재고자산({u})': f"{inv_v3/div:,.0f}",
+                f'매입채무({u})': f"{ap_v3/div:,.0f}",
                 'DSO(일)': f"{asmp['nwc_dso']:.1f}",
                 'DIO(일)': f"{asmp['nwc_dio']:.1f}",
                 'DPO(일)': f"{asmp['nwc_dpo']:.1f}",
-                'NWC잔액(억원)': f"{nwc_level/1e8:,.1f}",
-                'ΔNWC(억원)': f"{delta/1e8:,.1f}",
+                f'NWC잔액({u})': f"{nwc_level/div:,.0f}",
+                f'ΔNWC({u})': f"{delta/div:,.0f}",
                 'NWC/매출(%)': f"{eff_nwc_pct:.1f}%",
             }
-        st.markdown("**📊 NWC 추정 미리보기 — AR/재고/AP → DSO·DIO·DPO → NWC (억원)**")
-        st.dataframe(pd.DataFrame(nwc_preview), use_container_width=True)
+        st.markdown(f"**📊 NWC 추정 미리보기 — AR/재고/AP → DSO·DIO·DPO → NWC ({u})**")
+        show_table(pd.DataFrame(nwc_preview), use_container_width=True)
 
     elif asmp['nwc_method'] == 'pct_revenue':
         asmp['nwc_pct'] = st.number_input("NWC/매출 (%)", value=float(asmp.get('nwc_pct', 10.0)), step=0.5)
@@ -1131,8 +1147,8 @@ elif page == 'DCF 가정 입력':
             nwc_level = rev_v3 * asmp['nwc_pct'] / 100
             delta = nwc_level - prev_nwc
             prev_nwc = nwc_level
-            nwc_preview[yr_label] = {'NWC잔액(억원)': f"{nwc_level/1e8:,.1f}", 'ΔNWC(억원)': f"{delta/1e8:,.1f}"}
-        st.dataframe(pd.DataFrame(nwc_preview), use_container_width=True)
+            nwc_preview[yr_label] = {f'NWC잔액({u})': f"{nwc_level/div:,.0f}", f'ΔNWC({u})': f"{delta/div:,.0f}"}
+        show_table(pd.DataFrame(nwc_preview), use_container_width=True)
     else:
         asmp['nwc_fixed'] = st.number_input("연간 NWC 변동액 (원)", value=float(asmp.get('nwc_fixed', 0)), step=1e8)
 
@@ -1443,7 +1459,7 @@ elif page == 'DCF 결과':
         fcff_display = {}
         for metric, yr_vals in fcff_cols.items():
             fcff_display[metric] = {yr: v for yr, v in yr_vals}
-        st.dataframe(pd.DataFrame(fcff_display).T, use_container_width=True)
+        show_table(pd.DataFrame(fcff_display).T, use_container_width=True)
 
         st.divider()
 
@@ -1506,7 +1522,7 @@ elif page == 'DCF 결과':
         label = "주당가치 (원)" if shares > 0 else "EV (억원)"
         st.write(f"**{label}** (행: TGR, 열: WACC)")
         sens_display = sens_df_T.map(lambda x: f"{x:,.0f}" if x is not None and not np.isnan(x) else "N/A")
-        st.dataframe(sens_display, use_container_width=True)
+        show_table(sens_display, use_container_width=True)
 
         fig_heat = px.imshow(
             sens_df.map(lambda x: x if not np.isnan(x) else 0).values,
