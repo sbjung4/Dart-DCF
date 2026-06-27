@@ -668,6 +668,29 @@ def get_financial_statements(corp_code, year, api_key, report_type='11011', fs_d
                 result = _extract_financials_from_items(items)
                 result['_report_type_used'] = rprt_code
                 result['_fs_div_used'] = div
+
+                # D&A/CapEx가 0이면(주석에만 있는 경우, 예: 삼성전자 별도
+                # 재무제표) XBRL 주석(유형자산 노트) 파싱을 추가로 시도한다.
+                # 이 경로가 실패해도(None 반환) 기존 디버그 expander 폴백은
+                # 그대로 살아있으므로 안전하다.
+                cf = result.get('cash_flow', {})
+                is_ = result.get('income_statement', {})
+                need_da = cf.get('da', 0) == 0
+                need_capex = cf.get('capex', 0) == 0
+                if need_da or need_capex:
+                    try:
+                        xbrl_result = get_da_capex_from_xbrl_notes(corp_code, year, key, rprt_code)
+                    except Exception:
+                        xbrl_result = None
+                    if xbrl_result:
+                        if need_da and xbrl_result.get('da'):
+                            cf['da'] = xbrl_result['da']
+                            is_['da'] = is_.get('da') or xbrl_result['da']
+                            cf['_da_debug_items'] = None  # 주석에서 찾았으므로 디버그 표시 불필요
+                            result['_da_source'] = 'xbrl_note'
+                        if need_capex and xbrl_result.get('capex'):
+                            cf['capex'] = xbrl_result['capex']
+                            result['_capex_source'] = 'xbrl_note'
                 return result
             if data.get('status') not in ('000', '013'):
                 raise ValueError(f"DART API Error [{data.get('status')}]: {data.get('message', 'Unknown')}")
@@ -683,6 +706,268 @@ def get_financial_statements(corp_code, year, api_key, report_type='11011', fs_d
             "표준 재무제표 조회 대상이 아닙니다 (감사보고서 원문은 DART 웹사이트에서 확인 가능)."
         ),
     }
+
+
+def _find_rcept_no(corp_code, year, api_key, report_type='11011'):
+    """주어진 연도/보고서 종류에 해당하는 정기보고서의 접수번호(rcept_no)를
+    DART 공시검색(list.json) API로 조회한다.
+
+    fnlttSinglAcntAll.json은 rcept_no를 직접 돌려주지 않으므로, XBRL
+    원문(fnlttXbrl.xml)을 받으려면 이 단계가 별도로 필요하다. 보고서 종류별로
+    공시 제목에 포함되는 키워드가 다르므로(사업보고서/반기보고서/분기보고서),
+    report_type -> 제목 키워드로 매핑해 후보를 좁힌다.
+    """
+    key = get_dart_api_key(api_key)
+    report_keyword_map = {
+        '11011': '사업보고서',
+        '11012': '반기보고서',
+        '11013': '1분기보고서',
+        '11014': '3분기보고서',
+    }
+    keyword = report_keyword_map.get(report_type, '사업보고서')
+
+    # 정기보고서는 보통 회계연도 종료 후 다음해 초~3월 사이에 제출되므로
+    # 검색 구간을 회계연도 1/1 ~ 익년 6/30로 넉넉하게 잡는다.
+    bgn_de = f"{year}0101"
+    end_de = f"{year + 1}0630"
+
+    try:
+        url = f"{BASE_URL}/list.json"
+        params = {
+            "crtfc_key": key,
+            "corp_code": corp_code,
+            "bgn_de": bgn_de,
+            "end_de": end_de,
+            "pblntp_ty": "A",  # 정기공시
+            "page_count": 100,
+        }
+        resp = requests.get(url, params=params, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get('status') != '000':
+            return None
+        candidates = data.get('list', []) or []
+        for item in candidates:
+            report_nm = item.get('report_nm', '')
+            if keyword in report_nm and str(year) in report_nm:
+                return item.get('rcept_no')
+        # 연도 표시가 report_nm에 없는 경우도 있으므로 키워드만으로 재시도
+        for item in candidates:
+            if keyword in item.get('report_nm', ''):
+                return item.get('rcept_no')
+    except Exception:
+        return None
+    return None
+
+
+# 비차원(non-dimensional) XBRL 사실(fact) 태그 중 감가상각/상각 관련으로 볼 수
+# 있는 로컬 태그명 패턴 (대소문자 무시, 부분 일치)
+_XBRL_DA_TAG_PATTERNS = ['depreciation', 'amortisation', 'amortization']
+_XBRL_DA_EXCLUDE_TAG_PATTERNS = [
+    'accumulateddepreciation', 'accumulatedamortisation', 'accumulatedamortization',
+]
+_XBRL_CAPEX_TAG_PATTERNS = [
+    'purchaseofpropertyplantandequipment',
+    'acquisitionofpropertyplantandequipment',
+    'paymentsforpropertyplantandequipment',
+]
+
+
+def _local_tag(tag):
+    """'{namespace}LocalName' 형태의 ElementTree 태그에서 LocalName만 추출"""
+    if '}' in tag:
+        return tag.split('}', 1)[1]
+    return tag
+
+
+def _xbrl_build_duration_contexts(root):
+    """<context> 엘리먼트 중 기간(duration)을 나타내는 contextRef id 집합을 만든다.
+    instant(시점) 컨텍스트는 재무상태표용이라 D&A/CapEx(둘 다 기간 항목)에는
+    해당하지 않으므로 제외한다.
+
+    동시에 각 duration context의 (startDate, endDate)를 보관해, 사업연도
+    전체(약 365일)를 커버하는 컨텍스트만 추리는 데 사용한다 (분기/반기
+    누적이 아닌 값이 섞여 들어오는 것을 막기 위함 — 다만 1차 구현에서는
+    "duration이면서 dimension(segment)이 없는 것"까지만 걸러내고, 정밀한
+    날짜 길이 검증은 보수적으로 통과시킨다. 길이 미달이어도 완전히 버리기보다
+    참고용으로 남겨, 상위 호출자가 결과를 받고 _sum 정도의 안전장치만 적용).
+    """
+    duration_ctx = {}
+    for ctx in root.iter():
+        if _local_tag(ctx.tag) != 'context':
+            continue
+        ctx_id = ctx.get('id')
+        if not ctx_id:
+            continue
+        period = None
+        has_segment = False
+        for child in ctx:
+            if _local_tag(child.tag) == 'period':
+                start_el = None
+                end_el = None
+                for p in child:
+                    lt = _local_tag(p.tag)
+                    if lt == 'startDate':
+                        start_el = p
+                    elif lt == 'endDate':
+                        end_el = p
+                if start_el is not None and end_el is not None:
+                    period = (start_el.text, end_el.text)
+            elif _local_tag(child.tag) == 'entity':
+                for seg in child.iter():
+                    if _local_tag(seg.tag) == 'segment':
+                        # segment 자식이 실제로 있는지(차원 멤버) 확인
+                        if list(seg):
+                            has_segment = True
+        if period is not None:
+            duration_ctx[ctx_id] = {'period': period, 'has_segment': has_segment}
+    return duration_ctx
+
+
+def _xbrl_extract_facts(root, duration_ctx, tag_patterns, exclude_patterns=None, prefer_no_segment=True):
+    """XBRL instance에서 로컬 태그명이 tag_patterns 중 하나를 포함하는 모든
+    fact를 찾아, duration 컨텍스트(기간성)인 것만 골라 금액을 모은다.
+
+    동일 contextRef + 태그 조합은 한 번만 카운트해 중복 합산을 막는다
+    (DART XBRL은 동일 사실이 여러 단위/소수점 정밀도로 중복 표기되는 경우가
+    있음 - 기존 _sum_by_keyword의 dedup 패턴과 동일한 접근).
+
+    prefer_no_segment=True이면 비차원(segment 없음) 컨텍스트의 facts를 우선
+    사용하고, 그것이 전혀 없을 때만 차원(주석 PP&E 테이블 등) 컨텍스트의
+    facts를 합산한다 — 비차원 합계 vs 차원별 세부내역을 이중으로 더해버리는
+    것을 막기 위함.
+    """
+    exclude_patterns = exclude_patterns or []
+    seen = set()
+    no_seg_total = 0.0
+    seg_total = 0.0
+    no_seg_found = False
+    seg_found = False
+
+    for el in root.iter():
+        local = _local_tag(el.tag).lower()
+        if not any(p in local for p in tag_patterns):
+            continue
+        if any(p in local for p in exclude_patterns):
+            continue
+        ctx_ref = el.get('contextRef')
+        if not ctx_ref or ctx_ref not in duration_ctx:
+            continue  # instant context 등 기간 항목이 아닌 것은 제외
+        text = (el.text or '').strip()
+        if not text:
+            continue
+        try:
+            val = abs(float(text.replace(',', '')))
+        except ValueError:
+            continue
+        if val == 0:
+            continue
+        dedup_key = (_local_tag(el.tag), ctx_ref)
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+
+        if duration_ctx[ctx_ref]['has_segment']:
+            seg_total += val
+            seg_found = True
+        else:
+            no_seg_total += val
+            no_seg_found = True
+
+    if prefer_no_segment and no_seg_found:
+        return no_seg_total
+    if seg_found:
+        return seg_total
+    return no_seg_total if no_seg_found else 0.0
+
+
+def get_da_capex_from_xbrl_notes(corp_code, year, api_key, report_type='11011'):
+    """fnlttSinglAcntAll.json 본문(4대 재무제표)에는 D&A/CapEx가 0으로
+    잡히는 경우(예: 삼성전자 별도재무제표처럼 현금흐름표 본문에 감가상각비
+    줄 자체가 없고, 유형자산 주석의 "당기증가(상각)" 컬럼에만 있는 경우)를
+    위한 추가 폴백.
+
+    절차:
+      1) list.json으로 해당 연도/보고서종류의 rcept_no(접수번호)를 찾는다.
+      2) fnlttXbrl.xml로 XBRL 원문 zip을 받아 메모리에서 풀고 .xbrl(인스턴스
+         문서)을 ElementTree로 파싱한다.
+      3) 태그 로컬명에 depreciation/amortisation이 들어간 모든 duration
+         fact, 그리고 capex 관련 표준 태그를 찾아 합산한다.
+
+    실패 시(rcept_no 없음/zip 깨짐/파싱 실패/매칭 실패 등) 예외를 삼키고
+    None을 반환한다 — 이 함수가 실패해도 기존 폴백 흐름(디버그 expander
+    표시)이 그대로 동작해야 하므로 호출자에게 예외를 전달하지 않는다.
+    """
+    try:
+        key = get_dart_api_key(api_key)
+        if not key:
+            return None
+
+        rcept_no = _find_rcept_no(corp_code, year, key, report_type)
+        if not rcept_no:
+            return None
+
+        url = f"{BASE_URL}/fnlttXbrl.xml"
+        params = {
+            "crtfc_key": key,
+            "rcept_no": rcept_no,
+            "reprt_code": report_type,
+        }
+        resp = requests.get(url, params=params, timeout=60)
+        resp.raise_for_status()
+
+        # DART는 오류 시에도 200 + zip이 아닌 XML 오류 메시지를 줄 수 있으므로
+        # zip으로 열 수 없으면 그 자체로 실패 처리
+        try:
+            zf = zipfile.ZipFile(io.BytesIO(resp.content))
+        except zipfile.BadZipFile:
+            return None
+
+        xbrl_filenames = [n for n in zf.namelist() if n.lower().endswith(('.xbrl', '.xml'))]
+        if not xbrl_filenames:
+            return None
+
+        da_total = 0.0
+        capex_total = 0.0
+        found_any = False
+
+        for fname in xbrl_filenames:
+            try:
+                content = zf.read(fname)
+                root = ET.fromstring(content)
+            except (ET.ParseError, KeyError):
+                continue
+
+            duration_ctx = _xbrl_build_duration_contexts(root)
+            if not duration_ctx:
+                continue
+
+            da_val = _xbrl_extract_facts(
+                root, duration_ctx, _XBRL_DA_TAG_PATTERNS, _XBRL_DA_EXCLUDE_TAG_PATTERNS,
+            )
+            capex_val = _xbrl_extract_facts(
+                root, duration_ctx, _XBRL_CAPEX_TAG_PATTERNS,
+            )
+            if da_val > da_total:
+                da_total = da_val
+                found_any = True
+            if capex_val > capex_total:
+                capex_total = capex_val
+                found_any = True
+
+        if not found_any:
+            return None
+
+        return {
+            'da': da_total if da_total > 0 else None,
+            'capex': capex_total if capex_total > 0 else None,
+            'source': 'xbrl_note',
+        }
+    except Exception:
+        # XBRL 조회/파싱은 실패 경로가 매우 다양함 (네트워크, 잘못된 rcept_no,
+        # 예상과 다른 XML 구조 등) — 어떤 이유로든 실패하면 조용히 None을
+        # 반환해 기존 폴백(디버그 expander)이 그대로 동작하게 한다.
+        return None
 
 
 def get_business_segments(corp_code, year, api_key=None):

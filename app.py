@@ -127,6 +127,8 @@ def extract_historical_summary(financial_data: dict, years: list) -> dict:
         'interest_expense': {}, 'dividends_paid': {}, 'implied_interest_rate': {},
         # 순차입금 (IBD - 현금성자산)
         'ibd': {}, 'cash_equivalents': {}, 'net_debt': {},
+        # D&A를 XBRL 주석(유형자산 노트)에서 찾아낸 연도 표시용
+        'da_source': {},
     }
     for yr in years:
         yr_data = financial_data.get(str(yr), {})
@@ -135,6 +137,7 @@ def extract_historical_summary(financial_data: dict, years: list) -> dict:
         is_data = yr_data.get('income_statement', {})
         bs_data = yr_data.get('balance_sheet', {})
         cf_data = yr_data.get('cash_flow', {})
+        summary['da_source'][yr] = yr_data.get('_da_source')
 
         rev = is_data.get('revenue', 0)
         cogs = is_data.get('cogs', 0)
@@ -804,6 +807,16 @@ elif page == 'DCF 가정 입력':
 
     # D&A가 0으로 잡힌 연도가 있으면, DART가 실제로 내려준 CF/IS 계정명을
     # 그대로 보여줘서 어떤 명칭으로 들어오는지 직접 확인할 수 있게 한다.
+    # XBRL 주석 폴백이 값을 찾아낸 연도는 D&A가 0이 아니게 되므로 자동으로
+    # 아래 경고 expander 대상에서 빠진다. 다만 da==0이 아니더라도 출처가
+    # xbrl_note인 연도가 있으면 참고용으로 안내한다.
+    xbrl_note_years = [yr for yr in hist_years if hist.get('da_source', {}).get(yr) == 'xbrl_note']
+    if xbrl_note_years:
+        st.caption(
+            f"ℹ️ {', '.join(str(y) for y in xbrl_note_years)}년 D&A는 현금흐름표 본문에 "
+            "없어 XBRL 유형자산 주석(당기증가(상각) 등)에서 추출한 값입니다."
+        )
+
     zero_da_years = [yr for yr in hist_years if hist['da'].get(yr, 0) == 0]
     if zero_da_years:
         with st.expander(f"⚠️ {', '.join(str(y) for y in zero_da_years)}년 D&A가 0으로 조회됨 — DART 원본 계정명 확인"):
