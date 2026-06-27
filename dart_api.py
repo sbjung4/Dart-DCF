@@ -843,6 +843,7 @@ def _xbrl_build_duration_contexts(root):
             continue
         period = None
         has_segment = False
+        axes = set()
         for child in ctx:
             if _local_tag(child.tag) == 'period':
                 start_el = None
@@ -861,8 +862,16 @@ def _xbrl_build_duration_contexts(root):
                         # segment 자식이 실제로 있는지(차원 멤버) 확인
                         if list(seg):
                             has_segment = True
+                            for member in seg:
+                                dim = member.get('dimension')
+                                if dim:
+                                    axes.add(dim)
         if period is not None:
-            duration_ctx[ctx_id] = {'period': period, 'has_segment': has_segment}
+            duration_ctx[ctx_id] = {
+                'period': period,
+                'has_segment': has_segment,
+                'axes': frozenset(axes),
+            }
     return duration_ctx
 
 
@@ -882,9 +891,14 @@ def _xbrl_extract_facts(root, duration_ctx, tag_patterns, exclude_patterns=None,
     exclude_patterns = exclude_patterns or []
     seen = set()
     no_seg_total = 0.0
-    seg_total = 0.0
     no_seg_found = False
-    seg_found = False
+    # 차원(segment)이 있는 fact는 어떤 axis 조합에 속하는지별로 따로 합산한다.
+    # 동일 개념(예: 감가상각비)이 서로 무관한 여러 주석 테이블(예: 유형자산
+    # 종류별 내역 axis, 사업부문별 내역 axis)에 동시에 태깅되어 있는 경우,
+    # 모든 axis를 무조건 합치면 같은 금액이 여러 번 더해져 실제 총액보다
+    # 훨씬 큰 값이 나온다. 따라서 axis 조합별로 분리 합산한 뒤, 그 중 하나의
+    # axis 그룹(가장 큰 합계)만을 진짜 총액으로 사용한다.
+    seg_totals_by_axes = {}
 
     for el in root.iter():
         local = _local_tag(el.tag).lower()
@@ -909,17 +923,18 @@ def _xbrl_extract_facts(root, duration_ctx, tag_patterns, exclude_patterns=None,
             continue
         seen.add(dedup_key)
 
-        if duration_ctx[ctx_ref]['has_segment']:
-            seg_total += val
-            seg_found = True
+        ctx_info = duration_ctx[ctx_ref]
+        if ctx_info['has_segment']:
+            axes_key = ctx_info.get('axes', frozenset())
+            seg_totals_by_axes[axes_key] = seg_totals_by_axes.get(axes_key, 0.0) + val
         else:
             no_seg_total += val
             no_seg_found = True
 
     if prefer_no_segment and no_seg_found:
         return no_seg_total
-    if seg_found:
-        return seg_total
+    if seg_totals_by_axes:
+        return max(seg_totals_by_axes.values())
     return no_seg_total if no_seg_found else 0.0
 
 
