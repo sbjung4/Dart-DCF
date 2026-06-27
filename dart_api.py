@@ -849,6 +849,7 @@ def _xbrl_build_duration_contexts(root, target_year=None):
         period = None
         has_segment = False
         axes = set()
+        members = []
         for child in ctx:
             if _local_tag(child.tag) == 'period':
                 start_el = None
@@ -871,6 +872,7 @@ def _xbrl_build_duration_contexts(root, target_year=None):
                                 dim = member.get('dimension')
                                 if dim:
                                     axes.add(dim)
+                                    members.append(f"{dim}={(member.text or '').strip()}")
         if period is not None:
             if target_year is not None:
                 start_str, end_str = period
@@ -887,11 +889,13 @@ def _xbrl_build_duration_contexts(root, target_year=None):
                 'period': period,
                 'has_segment': has_segment,
                 'axes': frozenset(axes),
+                'members': members,
             }
     return duration_ctx
 
 
-def _xbrl_extract_facts(root, duration_ctx, tag_patterns, exclude_patterns=None, prefer_no_segment=True):
+def _xbrl_extract_facts(root, duration_ctx, tag_patterns, exclude_patterns=None, prefer_no_segment=True,
+                         debug_collector=None):
     """XBRL instance에서 로컬 태그명이 tag_patterns 중 하나를 포함하는 모든
     fact를 찾아, duration 컨텍스트(기간성)인 것만 골라 금액을 모은다.
 
@@ -915,6 +919,7 @@ def _xbrl_extract_facts(root, duration_ctx, tag_patterns, exclude_patterns=None,
     # 훨씬 큰 값이 나온다. 따라서 axis 조합별로 분리 합산한 뒤, 그 중 하나의
     # axis 그룹(가장 큰 합계)만을 진짜 총액으로 사용한다.
     seg_totals_by_axes = {}
+    seg_facts_by_axes = {}  # axes_key -> list of (tag, ctx_ref, members, val), for debugging
 
     for el in root.iter():
         local = _local_tag(el.tag).lower()
@@ -943,9 +948,27 @@ def _xbrl_extract_facts(root, duration_ctx, tag_patterns, exclude_patterns=None,
         if ctx_info['has_segment']:
             axes_key = ctx_info.get('axes', frozenset())
             seg_totals_by_axes[axes_key] = seg_totals_by_axes.get(axes_key, 0.0) + val
+            if debug_collector is not None:
+                seg_facts_by_axes.setdefault(axes_key, []).append(
+                    (_local_tag(el.tag), ctx_ref, ctx_info.get('members', []), val)
+                )
         else:
             no_seg_total += val
             no_seg_found = True
+
+    if debug_collector is not None:
+        debug_collector['no_seg_total'] = no_seg_total
+        debug_collector['axis_groups'] = [
+            {
+                'axes': sorted(axes_key),
+                'total': total,
+                'facts': [
+                    {'tag': tag, 'contextRef': cref, 'members': members, 'value': val}
+                    for tag, cref, members, val in seg_facts_by_axes.get(axes_key, [])
+                ],
+            }
+            for axes_key, total in seg_totals_by_axes.items()
+        ]
 
     if prefer_no_segment and no_seg_found:
         return no_seg_total
@@ -1040,8 +1063,10 @@ def get_da_capex_from_xbrl_notes(corp_code, year, api_key, report_type='11011'):
 
             # 감가상각비(유형자산) + 무형자산상각비 + 사용권자산상각비를 각각
             # 정확한 태그명으로 따로 찾아 합산 (영업활동현금흐름 조정항목 기준)
+            ppe_debug = {}
             da_ppe_val = _xbrl_extract_facts(
                 root, duration_ctx, _XBRL_DA_PPE_TAG_PATTERNS, _XBRL_DA_EXCLUDE_TAG_PATTERNS,
+                debug_collector=ppe_debug,
             )
             da_intangible_val = _xbrl_extract_facts(
                 root, duration_ctx, _XBRL_DA_INTANGIBLE_TAG_PATTERNS, _XBRL_DA_EXCLUDE_TAG_PATTERNS,
@@ -1059,6 +1084,7 @@ def get_da_capex_from_xbrl_notes(corp_code, year, api_key, report_type='11011'):
                 debug['da_breakdown'] = {
                     'ppe': da_ppe_val, 'intangible': da_intangible_val, 'rou': da_rou_val,
                 }
+                debug['da_ppe_axis_groups'] = ppe_debug.get('axis_groups')
             if capex_val > capex_total:
                 capex_total = capex_val
                 found_any = True

@@ -849,6 +849,13 @@ elif page == 'DCF 가정 입력':
                     f"무형자산상각비 {b.get('intangible', 0):,.0f} + "
                     f"사용권자산상각비 {b.get('rou', 0):,.0f}"
                 )
+                axis_groups = xbrl_dbg.get('da_ppe_axis_groups')
+                if axis_groups:
+                    with st.expander(f"🔬 {yr}년 감가상각비(유형자산) axis 그룹 상세 (진단용)"):
+                        for g in sorted(axis_groups, key=lambda g: -g['total']):
+                            st.markdown(f"**axis: `{g['axes']}`  합계: {g['total']:,.0f}**")
+                            for f in g['facts']:
+                                st.caption(f"  contextRef={f['contextRef']}  members={f['members']}  value={f['value']:,.0f}")
 
     zero_da_years = [yr for yr in hist_years if hist['da'].get(yr, 0) == 0]
     if zero_da_years:
