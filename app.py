@@ -122,6 +122,8 @@ def extract_historical_summary(financial_data: dict, years: list) -> dict:
     summary = {
         'revenue': {}, 'cogs': {}, 'gross_profit': {}, 'sga': {},
         'ebit': {}, 'net_income': {}, 'da': {}, 'da_debug': {}, 'capex': {},
+        'da_ppe': {}, 'da_intangible': {}, 'da_rou': {},
+        'da_combined_account': {}, 'da_is_side': {},
         'total_assets': {}, 'total_debt': {}, 'total_equity': {}, 'cash': {},
         'operating_cf': {}, 'investing_cf': {}, 'nwc': {},
         # 운전자본 세부 항목 (DSO/DIO/DPO 계산용)
@@ -158,6 +160,11 @@ def extract_historical_summary(financial_data: dict, years: list) -> dict:
         summary['net_income'][yr] = is_data.get('net_income', 0)
         summary['da'][yr] = cf_data.get('da', is_data.get('da', 0))
         summary['da_debug'][yr] = cf_data.get('_da_debug_items')
+        summary['da_ppe'][yr] = is_data.get('da_ppe', 0)
+        summary['da_intangible'][yr] = is_data.get('da_intangible', 0)
+        summary['da_rou'][yr] = is_data.get('da_rou', 0)
+        summary['da_combined_account'][yr] = is_data.get('da_combined_account', 0)
+        summary['da_is_side'][yr] = is_data.get('da_is_side', 0)
         summary['capex'][yr] = cf_data.get('capex', 0)
         summary['total_assets'][yr] = bs_data.get('total_assets', 0)
         summary['total_debt'][yr] = bs_data.get('total_debt', 0)
@@ -821,6 +828,24 @@ elif page == 'DCF 가정 입력':
         }
     st.markdown("**과거 D&A / CapEx 실적**")
     st.dataframe(pd.DataFrame(da_capex_hist), use_container_width=True)
+
+    with st.expander("🔎 D&A 구성요소 보기 (메인 재무제표 기준 — 어떤 계정이 얼마씩 더해졌는지)"):
+        u_dbg = current_unit()
+        breakdown_rows = {}
+        for yr in hist_years:
+            breakdown_rows[str(yr)] = {
+                f'PPE 감가상각비({u_dbg})': fmt_억(hist['da_ppe'].get(yr, 0)),
+                f'무형자산상각비({u_dbg})': fmt_억(hist['da_intangible'].get(yr, 0)),
+                f'사용권자산(ROU)상각비({u_dbg})': fmt_억(hist['da_rou'].get(yr, 0)),
+                f'결합계정(감가상각비와무형자산상각비)({u_dbg})': fmt_억(hist['da_combined_account'].get(yr, 0)),
+                f'IS측 D&A({u_dbg})': fmt_억(hist['da_is_side'].get(yr, 0)),
+                f'최종 채택 D&A({u_dbg})': fmt_억(hist['da'].get(yr, 0)),
+            }
+        st.dataframe(pd.DataFrame(breakdown_rows), use_container_width=True)
+        st.caption(
+            "최종 채택 D&A = PPE+무형자산+ROU 합계가 있으면 그 합계, 없으면 결합계정, "
+            "없으면 IS측, 모두 0이면 '상각비' 키워드 전체 합산(최종 폴백) 또는 XBRL 주석 폴백 값."
+        )
 
     # D&A가 0으로 잡힌 연도가 있으면, DART가 실제로 내려준 CF/IS 계정명을
     # 그대로 보여줘서 어떤 명칭으로 들어오는지 직접 확인할 수 있게 한다.

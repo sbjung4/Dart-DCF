@@ -474,17 +474,15 @@ def _extract_financials_from_items(items):
         if da == 0:
             da = _sum_by_keyword(is_items, None, ['상각비', '개발비상각'], DA_EXCLUDE_KEYWORDS)
 
-    # D&A가 0일 경우 진단용으로 CF/IS 원본 계정명을 남겨, 어떤 계정명으로
-    # 들어오는지 화면에서 직접 확인할 수 있도록 한다 (account_id가 비표준이라
-    # 키워드 매칭에 실패하는 경우를 찾기 위함).
-    da_debug_items = None
-    if da == 0:
-        da_debug_items = [
-            {'sj_div': it.get('sj_div'), 'account_nm': it.get('account_nm'),
-             'thstrm_amount': it.get('thstrm_amount')}
-            for it in (cf_items + is_items)
-            if it.get('account_nm')
-        ]
+    # D&A 진단용으로 CF/IS 원본 계정명을 항상 남겨, 어떤 계정명으로 들어오는지
+    # 화면에서 직접 확인할 수 있도록 한다 (account_id가 비표준이라 키워드
+    # 매칭에 실패하거나, 의도와 다른 계정이 잡히는 경우를 찾기 위함).
+    da_debug_items = [
+        {'sj_div': it.get('sj_div'), 'account_nm': it.get('account_nm'),
+         'thstrm_amount': it.get('thstrm_amount')}
+        for it in (cf_items + is_items)
+        if it.get('account_nm')
+    ]
 
     interest_expense = _lookup_account(is_map, ACCOUNT_MAP['interest_expense'], KOREAN_NAME_KEYWORDS['interest_expense'])
     dividends_paid = abs(_lookup_account(cf_map, ACCOUNT_MAP['dividends_paid'], KOREAN_NAME_KEYWORDS['dividends_paid']))
@@ -592,6 +590,8 @@ def _extract_financials_from_items(items):
             'da_ppe': da_ppe,
             'da_intangible': da_intangible,
             'da_rou': da_rou,
+            'da_combined_account': da_cf,
+            'da_is_side': da_is,
             'interest_expense': interest_expense,
         },
         'balance_sheet': {
@@ -614,7 +614,7 @@ def _extract_financials_from_items(items):
             'investing_cf': investing_cf,
             'financing_cf': financing_cf,
             'capex': capex,
-            'da': da_cf if da_cf > 0 else da,
+            'da': da,
             'dividends_paid': dividends_paid,
             '_da_debug_items': da_debug_items,
         },
