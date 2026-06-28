@@ -1205,6 +1205,25 @@ def _normalize_ws(s):
     return re.sub(r'\s+', '', s or '')
 
 
+def _sample_table_headers(root, limit=15):
+    """진단용: 문서에서 발견된 표들의 헤더 텍스트를 일부 수집해 반환한다.
+    매칭에 실패했을 때, 실제 문서의 표 헤더가 어떤 모양인지 확인하기 위함."""
+    samples = []
+    for el in root.iter():
+        if _local_tag(el.tag).lower() != 'table':
+            continue
+        rows = [tr for tr in el if _local_tag(tr.tag).lower() == 'tr']
+        if not rows:
+            continue
+        header_cells = [td for td in rows[0] if _local_tag(td.tag).lower() in ('td', 'th')]
+        header_texts = [_cell_text(td) for td in header_cells]
+        if any(t for t in header_texts):
+            samples.append(header_texts)
+        if len(samples) >= limit:
+            break
+    return samples
+
+
 def _find_revenue_table_with_unit(root):
     """문서 트리를 순서대로 훑어, 사업보고서 "4. 매출 및 수주상황 > 가. 매출실적"의
     표를 찾는다. 표 직전에 등장한 "(단위 : 억원)" 같은 단위 표기도 함께
@@ -1223,6 +1242,10 @@ def _find_revenue_table_with_unit(root):
     after_heading = False
     fallback_table = None
     fallback_unit = None
+    loose_fallback_table = None
+    loose_fallback_unit = None
+
+    heading_hints_norm = tuple(_normalize_ws(h) for h in _REVENUE_SECTION_HEADING_HINTS)
 
     for el in root.iter():
         local = _local_tag(el.tag).lower()
@@ -1235,21 +1258,29 @@ def _find_revenue_table_with_unit(root):
             header_norm = _normalize_ws(' '.join(header_texts))
             if '매출유형' in header_norm and '품목' in header_norm:
                 return el, pending_unit
-            if after_heading and fallback_table is None and any(
-                _PERIOD_HEADER_RE.search(t) for t in header_texts
-            ):
+            has_period_col = any(_PERIOD_HEADER_RE.search(t) for t in header_texts)
+            if after_heading and fallback_table is None and has_period_col:
                 fallback_table = el
                 fallback_unit = pending_unit
+            if loose_fallback_table is None and has_period_col and '부문' in header_norm:
+                loose_fallback_table = el
+                loose_fallback_unit = pending_unit
         else:
-            txt = (el.text or '').strip()
-            if txt:
-                if any(h in txt for h in _REVENUE_SECTION_HEADING_HINTS):
+            # 제목/단위 텍스트가 el.text가 아니라 el.tail(자식 태그 뒤 텍스트)에
+            # 들어있는 경우도 있어 둘 다 검사한다.
+            for txt in ((el.text or '').strip(), (el.tail or '').strip()):
+                if not txt:
+                    continue
+                txt_norm = _normalize_ws(txt)
+                if any(h in txt_norm for h in heading_hints_norm):
                     after_heading = True
                 if '단위' in txt:
                     m = _UNIT_TEXT_RE.search(txt)
                     if m:
                         pending_unit = m.group(1)
-    return fallback_table, fallback_unit
+    if fallback_table is not None:
+        return fallback_table, fallback_unit
+    return loose_fallback_table, loose_fallback_unit
 
 
 def _parse_revenue_table(table):
@@ -1372,6 +1403,7 @@ def get_business_segments(corp_code, year, api_key=None, report_type='11011', fs
 
             table, unit_text = _find_revenue_table_with_unit(root)
             if table is None:
+                debug.setdefault('sample_headers', {})[fname] = _sample_table_headers(root)
                 continue
             debug['unit_text'] = unit_text
             debug['source_file'] = fname
