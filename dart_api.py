@@ -1353,20 +1353,42 @@ def _parse_revenue_table(table):
         return {}
     period_col = next(i for i, t in enumerate(header_texts) if _PERIOD_HEADER_RE.search(t))
 
+    # 일부 회사(예: 서진시스템)는 "제NN기" 헤더 칸 하나가 실제로는 "매출액"/
+    # "비중" 두 개의 실데이터 칼럼을 colspan으로 합친 표제일 뿐이고, 바로
+    # 다음 행에 그 하위 칼럼명("매출액"/"비중")이 따로 나온다. 이 경우
+    # period_col을 그대로 쓰면 데이터 행과 칼럼 수가 안 맞아(실제 칼럼이 더
+    # 많음) 전부 스킵된다. 다음 행이 그런 하위 헤더로 보이면, 실데이터
+    # 기준 칼럼 위치를 다시 계산한다.
+    division_col = 0
+    total_columns = len(header_cells)
+    data_start_idx = header_row_idx + 1
+    sub_row = rows[header_row_idx + 1] if header_row_idx + 1 < len(rows) else None
+    if sub_row is not None:
+        sub_texts = [_cell_text(td) for td in _row_cells(sub_row)]
+        if any(t.strip() == '비중' for t in sub_texts):
+            fixed_col_count = period_col
+            rev_offset = next((i for i, t in enumerate(sub_texts) if '매출액' in t), 0)
+            period_col = fixed_col_count + rev_offset
+            total_columns = fixed_col_count + len(sub_texts)
+            data_start_idx = header_row_idx + 2
+            division_idx = next((i for i, t in enumerate(header_texts[:fixed_col_count]) if '품목' in t), None)
+            if division_idx is not None:
+                division_col = division_idx
+
     totals = {}
     last_division = None
-    for tr in rows[header_row_idx + 1:]:
+    for tr in rows[data_start_idx:]:
         cells = _row_cells(tr)
         if not cells:
             continue
         texts = [_cell_text(td) for td in cells]
-        n_missing = len(header_cells) - len(cells)
+        n_missing = total_columns - len(cells)
         if n_missing > 0:
             texts = [''] * n_missing + texts
         elif n_missing < 0:
             continue
 
-        division = texts[0].strip() or last_division
+        division = texts[division_col].strip() or last_division
         if not division:
             continue
         last_division = division
@@ -1384,7 +1406,7 @@ def _parse_revenue_table(table):
             continue
         if is_negative:
             continue  # 부문간 내부거래 제거 등 음수 조정행은 매출이 아니므로 제외
-        if any(k in division for k in _SEGMENT_ROW_EXCLUDE):
+        if any(k in _normalize_ws(division) for k in _SEGMENT_ROW_EXCLUDE):
             continue
         totals[division] = totals.get(division, 0.0) + val
     return totals
