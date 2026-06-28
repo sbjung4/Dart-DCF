@@ -1136,6 +1136,40 @@ def get_da_capex_from_xbrl_notes(corp_code, year, api_key, report_type='11011', 
         return {'da': None, 'capex': None, 'source': None, '_debug': debug}
 
 
+_INVALID_XML_CHARS_RE = re.compile('[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]')
+_BARE_AMP_RE = re.compile(r'&(?!amp;|lt;|gt;|quot;|apos;|#\d+;|#x[0-9a-fA-F]+;)')
+
+
+def _lenient_parse_xml(raw):
+    """DART 사업보고서 원문(document.xml)은 잘못 escape된 '&' (예: "R&D",
+    "AT&T" 등 실제 HWP/한글 문서에서 그대로 넘어온 텍스트)나 XML 1.0에서
+    허용하지 않는 제어문자가 섞여 있어, 표준 인코딩(UTF-8)으로 디코딩해도
+    ET.fromstring이 "not well-formed (invalid token)"으로 실패하는 경우가
+    매우 흔하다. 인코딩 후보(UTF-8/CP949/EUC-KR)와 정제(제어문자 제거 +
+    잘못된 '&' escape 보정) 조합을 순서대로 시도해 가장 먼저 성공하는
+    결과를 반환한다. 전부 실패하면 마지막 ParseError를 그대로 올린다.
+    """
+    texts = []
+    for enc in ('utf-8', 'cp949', 'euc-kr'):
+        try:
+            texts.append(raw.decode(enc))
+        except (UnicodeDecodeError, LookupError):
+            continue
+    if not texts:
+        texts.append(raw.decode('utf-8', errors='replace'))
+
+    last_err = None
+    for text in texts:
+        cleaned = _INVALID_XML_CHARS_RE.sub('', text)
+        cleaned = _BARE_AMP_RE.sub('&amp;', cleaned)
+        for candidate in (text, cleaned):
+            try:
+                return ET.fromstring(candidate)
+            except ET.ParseError as e:
+                last_err = e
+    raise last_err
+
+
 _UNIT_TEXT_RE = re.compile(r'단위\s*[:：]\s*([^()\[\]]+)')
 _PERIOD_HEADER_RE = re.compile(r'제\s*\d+\s*기')
 _SEGMENT_ROW_EXCLUDE = ('합계', '총계', '소계', '기타', '내부거래')
@@ -1297,13 +1331,10 @@ def get_business_segments(corp_code, year, api_key=None, report_type='11011', fs
         for fname in xml_filenames:
             raw = zf.read(fname)
             try:
-                root = ET.fromstring(raw)
-            except ET.ParseError:
-                try:
-                    root = ET.fromstring(raw.decode('cp949', errors='replace').encode('utf-8'))
-                except ET.ParseError as e:
-                    debug.setdefault('parse_errors', []).append(f"{fname}: {e}")
-                    continue
+                root = _lenient_parse_xml(raw)
+            except ET.ParseError as e:
+                debug.setdefault('parse_errors', []).append(f"{fname}: {e}")
+                continue
 
             table, unit_text = _find_revenue_table_with_unit(root)
             if table is None:
