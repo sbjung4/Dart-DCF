@@ -765,9 +765,12 @@ elif page == 'DCF 가정 입력':
                 seg['name'] = st.text_input("부문명", value=seg['name'], key=f"seg_name_{j}")
                 seg['base'] = st.number_input("기준 매출(원)", value=float(seg['base']), step=1e8, key=f"seg_base_{j}")
                 cols = st.columns(n)
+                running = seg['base']
                 for i, col in enumerate(cols):
                     with col:
                         seg['growth_rates'][i] = col.number_input(f"{proj_years[i]}(%)", value=float(seg['growth_rates'][i] if i < len(seg['growth_rates']) else 3.0), step=0.5, key=f"seg_gr_{j}_{i}")
+                        running = running * (1 + seg['growth_rates'][i] / 100)
+                        col.caption(f"→ {running/div:,.0f}{u}")
         asmp['revenue_segments'] = segments
         base_rev = sum(s['base'] for s in segments)
         growth_rates = [(sum(s['base'] * s['growth_rates'][i] for s in segments) / max(base_rev,1)) for i in range(n)]
