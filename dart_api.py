@@ -1178,7 +1178,7 @@ def _lenient_parse_xml(raw):
 
 _UNIT_TEXT_RE = re.compile(r'단위\s*[:：]\s*([^()\[\]]+)')
 _PERIOD_HEADER_RE = re.compile(r'제\s*\d+\s*기')
-_SEGMENT_ROW_EXCLUDE = ('합계', '총계', '소계', '기타', '내부거래')
+_SEGMENT_ROW_EXCLUDE = ('합계', '총계', '소계', '내부거래')
 
 
 def _cell_text(el):
