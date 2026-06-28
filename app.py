@@ -146,6 +146,8 @@ def extract_historical_summary(financial_data: dict, years: list) -> dict:
         'ibd': {}, 'cash_equivalents': {}, 'net_debt': {},
         # D&A를 XBRL 주석(유형자산 노트)에서 찾아낸 연도 표시용
         'da_source': {}, 'xbrl_debug': {},
+        # 사업부문별 매출액 (XBRL 영업부문 주석, IFRS 8 OperatingSegmentsAxis)
+        'segment_revenue': {},
     }
     for yr in years:
         yr_data = financial_data.get(str(yr), {})
@@ -156,6 +158,7 @@ def extract_historical_summary(financial_data: dict, years: list) -> dict:
         cf_data = yr_data.get('cash_flow', {})
         summary['da_source'][yr] = yr_data.get('_da_source')
         summary['xbrl_debug'][yr] = yr_data.get('_xbrl_debug')
+        summary['segment_revenue'][yr] = yr_data.get('_segments') or {}
 
         rev = is_data.get('revenue', 0)
         cogs = is_data.get('cogs', 0)
@@ -389,6 +392,13 @@ if page == '기업 검색':
                                 financial_data[str(yr)] = fs
                                 if fs.get('_no_data'):
                                     no_data_years.append(yr)
+                                else:
+                                    try:
+                                        fs['_segments'] = get_business_segments(
+                                            corp_code, yr, api_key, report_type='11011', fs_div=fs_div
+                                        )
+                                    except Exception:
+                                        fs['_segments'] = {}
                             except Exception as e:
                                 st.warning(f"{yr}년 데이터 로드 실패: {str(e)}")
                                 financial_data[str(yr)] = {}
@@ -554,6 +564,24 @@ elif page == '재무제표 확인':
         column_config={'항목': st.column_config.Column(width='large')},
     )
 
+    # 사업부문별 매출액 (XBRL 영업부문 주석, 추출에 성공한 연도가 있을 때만 표시)
+    seg_rev_by_year = hist.get('segment_revenue', {})
+    if any(seg_rev_by_year.get(yr) for yr in years):
+        st.markdown(f"#### 사업부문별 매출액 (단위: {u})")
+        all_segments = sorted({seg for yr in years for seg in seg_rev_by_year.get(yr, {})})
+        seg_display = {}
+        for yr in years:
+            seg_data = seg_rev_by_year.get(yr, {})
+            row = {seg: fmt_억(seg_data.get(seg, 0)) for seg in all_segments}
+            row[f'전체 매출액({u})'] = fmt_억(hist['revenue'].get(yr, 0))
+            seg_display[str(yr)] = row
+        seg_df = pd.DataFrame(seg_display).reset_index().rename(columns={'index': '항목'})
+        show_table(
+            seg_df, use_container_width=True, hide_index=True,
+            column_config={'항목': st.column_config.Column(width='medium')},
+        )
+        st.caption("사업부문 매출액은 재무제표 주석(IFRS 8 영업부문 정보)에서 추출한 값으로, 부문간 내부거래 제거 전이라 합계가 전체 매출액과 정확히 일치하지 않을 수 있습니다.")
+
     # 재무상태표 (연도를 열로 표시, 오름차순)
     st.markdown(f"#### 재무상태 (단위: {u})")
     bs_rows = {
@@ -691,9 +719,23 @@ elif page == 'DCF 가정 입력':
         show_table(pd.DataFrame(rev_preview), use_container_width=True)
 
     else:
+        xbrl_segments = hist.get('segment_revenue', {}).get(base_year, {})
         segments = asmp.get('revenue_segments', [])
         if not segments:
-            segments = [{'name': '세그먼트1', 'base': hist['revenue'].get(base_year, 0), 'growth_rates': [5.0]*n}]
+            if xbrl_segments:
+                segments = [{'name': name, 'base': val, 'growth_rates': [5.0]*n} for name, val in xbrl_segments.items()]
+            else:
+                segments = [{'name': '세그먼트1', 'base': hist['revenue'].get(base_year, 0), 'growth_rates': [5.0]*n}]
+            asmp['revenue_segments'] = segments
+
+        if xbrl_segments:
+            st.caption(f"📡 DART 재무제표 주석(영업부문 정보)에서 {base_year}년 사업부문 {len(xbrl_segments)}개를 자동으로 가져왔습니다.")
+            if st.button("🔄 DART 사업부문 데이터로 재설정"):
+                segments = [{'name': name, 'base': val, 'growth_rates': [5.0]*n} for name, val in xbrl_segments.items()]
+                asmp['revenue_segments'] = segments
+        else:
+            st.caption("⚠️ 이 기업/연도의 XBRL 주석에서 사업부문별 매출을 자동으로 찾지 못했습니다. 아래에서 직접 입력해주세요.")
+
         n_seg = st.number_input("사업부문 수", min_value=1, max_value=10, value=len(segments))
         while len(segments) < n_seg:
             segments.append({'name': f'세그먼트{len(segments)+1}', 'base': 0, 'growth_rates': [5.0]*n})

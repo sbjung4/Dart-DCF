@@ -1135,14 +1135,213 @@ def get_da_capex_from_xbrl_notes(corp_code, year, api_key, report_type='11011', 
         return {'da': None, 'capex': None, 'source': None, '_debug': debug}
 
 
-def get_business_segments(corp_code, year, api_key=None):
-    """Attempt to get business segment data - returns empty list if not available"""
+_XBRL_REVENUE_TAG_PATTERNS = [
+    'revenuefromcontractswithcustomers',
+    'revenue',
+]
+# 매출 자체가 아닌 관련 항목(계약자산/부채, 이연/미billed, 증감내역 등)은 제외
+_XBRL_REVENUE_EXCLUDE_PATTERNS = [
+    'costof', 'deferred', 'unbilled', 'accrued', 'increasedecrease',
+    'contractasset', 'contractliability', 'unearned',
+]
+# 사업부문(영업부문) 정보는 IFRS 8 표준 축인 ifrs-full:OperatingSegmentsAxis로
+# 태깅되는 것이 일반적이나, 회사 확장 taxonomy에서 비슷한 이름의 축을 쓰는
+# 경우도 있어 부분일치로 후보를 넓게 잡는다.
+_SEGMENT_AXIS_HINTS = ('operatingsegmentsaxis', 'segmentaxis', 'segmentsaxis')
+
+
+def _xbrl_extract_segment_revenue(root, duration_ctx, tag_patterns, exclude_patterns=None):
+    """매출 관련 fact를 찾아, 단일 axis(세그먼트로 추정되는 축)로만 차원화된
+    context의 값을 axis별 {멤버: 합계} 형태로 모은다.
+
+    여러 axis가 동시에 걸린 교차표(예: 세그먼트 x 지역) context는 제외한다 —
+    그런 교차표까지 포함하면 같은 세그먼트 매출이 지역별로 나뉘어 또 한 번
+    잡혀 이중 카운트된다. 최종적으로 '세그먼트'로 보이는 이름의 축이 있으면
+    그중 멤버 수가 가장 많은 축을, 없으면 멤버 수가 가장 많은 axis를 채택한다.
+    """
+    exclude_patterns = exclude_patterns or []
+    seen = set()
+    by_axes = {}  # axes_key(frozenset of 1 dim) -> {member_label: value}
+
+    for el in root.iter():
+        local = _local_tag(el.tag).lower()
+        if not any(p in local for p in tag_patterns):
+            continue
+        if any(p in local for p in exclude_patterns):
+            continue
+        ctx_ref = el.get('contextRef')
+        if not ctx_ref or ctx_ref not in duration_ctx:
+            continue
+        ctx_info = duration_ctx[ctx_ref]
+        axes_key = ctx_info.get('axes', frozenset())
+        if len(axes_key) != 1:
+            continue
+        text = (el.text or '').strip()
+        if not text:
+            continue
+        try:
+            val = abs(float(text.replace(',', '')))
+        except ValueError:
+            continue
+        if val == 0:
+            continue
+        dedup_key = (_local_tag(el.tag), ctx_ref)
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+
+        member_qname = None
+        for m in ctx_info.get('members', []):
+            dim, _, member_text = m.partition('=')
+            if frozenset([dim]) == axes_key:
+                member_qname = member_text
+                break
+        if not member_qname:
+            continue
+        bucket = by_axes.setdefault(axes_key, {})
+        bucket[member_qname] = bucket.get(member_qname, 0.0) + val
+
+    if not by_axes:
+        return None, {}
+
+    def axis_local(ax):
+        return next(iter(ax)).lower()
+
+    segment_axes = [ax for ax in by_axes if any(h in axis_local(ax) for h in _SEGMENT_AXIS_HINTS)]
+    candidates = segment_axes if segment_axes else list(by_axes.keys())
+    chosen = max(candidates, key=lambda ax: len(by_axes[ax]))
+    return next(iter(chosen)), by_axes[chosen]
+
+
+def _qname_to_label_id(qname):
+    """'dart:DXMember' -> 'dart_DXMember' (label linkbase의 loc href #fragment 규칙)"""
+    if ':' in qname:
+        prefix, local = qname.split(':', 1)
+        return f"{prefix}_{local}"
+    return qname
+
+
+_XLINK_NS = '{http://www.w3.org/1999/xlink}'
+_XML_NS = '{http://www.w3.org/XML/1998/namespace}'
+
+
+def _parse_label_linkbase(content):
+    """XBRL label linkbase(_lab.xml)를 파싱해 {element_id: 한글 라벨} 매핑을 만든다.
+    실패하거나 한글 라벨이 없으면 빈 dict를 반환한다."""
     try:
-        # DART doesn't have a direct segment API endpoint
-        # This would require parsing XBRL or notes data
-        return []
+        root = ET.fromstring(content)
+    except ET.ParseError:
+        return {}
+
+    loc_to_elem = {}   # xlink:label(loc) -> element id (href의 # 뒷부분)
+    label_text = {}    # xlink:label(label) -> 텍스트
+    arcs = []          # (from, to)
+
+    for el in root.iter():
+        lt = _local_tag(el.tag)
+        if lt == 'loc':
+            href = el.get(f'{_XLINK_NS}href', '')
+            frag = href.rsplit('#', 1)[-1] if '#' in href else href
+            lbl = el.get(f'{_XLINK_NS}label')
+            if lbl:
+                loc_to_elem[lbl] = frag
+        elif lt == 'label':
+            lbl = el.get(f'{_XLINK_NS}label')
+            lang = el.get(f'{_XML_NS}lang', '')
+            role = el.get(f'{_XLINK_NS}role', '')
+            if lbl and lang.lower().startswith('ko') and 'label' in role:
+                label_text[lbl] = (el.text or '').strip()
+        elif lt == 'labelArc':
+            frm = el.get(f'{_XLINK_NS}from')
+            to = el.get(f'{_XLINK_NS}to')
+            if frm and to:
+                arcs.append((frm, to))
+
+    elem_to_ko = {}
+    for frm, to in arcs:
+        elem_id = loc_to_elem.get(frm)
+        ko = label_text.get(to)
+        if elem_id and ko:
+            elem_to_ko[elem_id] = ko
+    return elem_to_ko
+
+
+def _clean_member_label(qname):
+    """라벨 linkbase에 없을 때 쓰는 fallback: 'dart:DXMember' -> 'DX'"""
+    label = qname.split(':', 1)[-1]
+    if label.endswith('Member'):
+        label = label[:-len('Member')]
+    return label or qname
+
+
+def get_business_segments(corp_code, year, api_key=None, report_type='11011', fs_div='CFS'):
+    """XBRL 주석(영업부문 정보, IFRS 8 OperatingSegmentsAxis)에서 사업부문별
+    매출액을 추출한다. 사업보고서의 "매출 및 수주상황"이 아니라 재무제표
+    주석(세그먼트 정보)을 사용한다 — DART OpenAPI에는 "매출 및 수주상황"을
+    구조화된 형태로 주는 엔드포인트가 없기 때문이다.
+
+    실패하거나 세그먼트가 1개뿐이면(=의미있는 분할이 없으면) 빈 dict를
+    반환한다. 성공 시 {세그먼트명: 매출액(원)} 형태로 반환한다.
+    """
+    try:
+        key = get_dart_api_key(api_key)
+        if not key:
+            return {}
+
+        rcept_no = _find_rcept_no(corp_code, year, key, report_type)
+        if not rcept_no:
+            return {}
+
+        url = f"{BASE_URL}/fnlttXbrl.xml"
+        params = {"crtfc_key": key, "rcept_no": rcept_no, "reprt_code": report_type}
+        resp = requests.get(url, params=params, timeout=60)
+        resp.raise_for_status()
+
+        try:
+            zf = zipfile.ZipFile(io.BytesIO(resp.content))
+        except zipfile.BadZipFile:
+            return {}
+
+        xbrl_filenames = [n for n in zf.namelist() if n.lower().endswith(('.xbrl', '.xml'))]
+        label_filenames = [n for n in xbrl_filenames if 'lab' in n.lower()]
+        instance_filenames = [n for n in xbrl_filenames if n not in label_filenames]
+
+        elem_to_ko = {}
+        for fname in label_filenames:
+            try:
+                elem_to_ko.update(_parse_label_linkbase(zf.read(fname)))
+            except KeyError:
+                continue
+
+        best_axis_member_count = 0
+        best_segments = {}
+        for fname in instance_filenames:
+            try:
+                root = ET.fromstring(zf.read(fname))
+            except (ET.ParseError, KeyError):
+                continue
+
+            duration_ctx = _xbrl_build_duration_contexts(root, target_year=year, fs_div=fs_div)
+            if not duration_ctx:
+                continue
+
+            _, seg_dict = _xbrl_extract_segment_revenue(
+                root, duration_ctx, _XBRL_REVENUE_TAG_PATTERNS, _XBRL_REVENUE_EXCLUDE_PATTERNS,
+            )
+            if len(seg_dict) > best_axis_member_count:
+                best_axis_member_count = len(seg_dict)
+                best_segments = seg_dict
+
+        if best_axis_member_count < 2:
+            return {}
+
+        result = {}
+        for qname, val in best_segments.items():
+            label = elem_to_ko.get(_qname_to_label_id(qname)) or _clean_member_label(qname)
+            result[label] = result.get(label, 0.0) + val
+        return result
     except Exception:
-        return []
+        return {}
 
 
 def parse_financial_data(raw_data):
