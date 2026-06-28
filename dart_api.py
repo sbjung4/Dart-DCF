@@ -1,5 +1,6 @@
 import os
 import io
+import re
 import zipfile
 import requests
 from datetime import datetime
@@ -1135,167 +1136,130 @@ def get_da_capex_from_xbrl_notes(corp_code, year, api_key, report_type='11011', 
         return {'da': None, 'capex': None, 'source': None, '_debug': debug}
 
 
-_XBRL_REVENUE_TAG_PATTERNS = [
-    'revenuefromcontractswithcustomers',
-    'revenue',
-]
-# 매출 자체가 아닌 관련 항목(계약자산/부채, 이연/미billed, 증감내역 등)은 제외
-_XBRL_REVENUE_EXCLUDE_PATTERNS = [
-    'costof', 'deferred', 'unbilled', 'accrued', 'increasedecrease',
-    'contractasset', 'contractliability', 'unearned',
-]
-# 사업부문(영업부문) 정보는 IFRS 8 표준 축인 ifrs-full:OperatingSegmentsAxis로
-# 태깅되는 것이 일반적이나, 회사 확장 taxonomy에서 비슷한 이름의 축을 쓰는
-# 경우도 있어 부분일치로 후보를 넓게 잡는다.
-_SEGMENT_AXIS_HINTS = ('operatingsegmentsaxis', 'segmentaxis', 'segmentsaxis')
+_UNIT_TEXT_RE = re.compile(r'단위\s*[:：]\s*([^()\[\]]+)')
+_PERIOD_HEADER_RE = re.compile(r'제\s*\d+\s*기')
+_SEGMENT_ROW_EXCLUDE = ('합계', '총계', '소계', '기타', '내부거래')
 
 
-def _xbrl_extract_segment_revenue(root, duration_ctx, tag_patterns, exclude_patterns=None):
-    """매출 관련 fact를 찾아, 단일 axis(세그먼트로 추정되는 축)로만 차원화된
-    context의 값을 axis별 {멤버: 합계} 형태로 모은다.
+def _cell_text(el):
+    return ''.join(el.itertext()).strip()
 
-    여러 axis가 동시에 걸린 교차표(예: 세그먼트 x 지역) context는 제외한다 —
-    그런 교차표까지 포함하면 같은 세그먼트 매출이 지역별로 나뉘어 또 한 번
-    잡혀 이중 카운트된다. 최종적으로 '세그먼트'로 보이는 이름의 축이 있으면
-    그중 멤버 수가 가장 많은 축을, 없으면 멤버 수가 가장 많은 axis를 채택한다.
+
+def _unit_text_to_multiplier(unit_text):
+    t = (unit_text or '').replace(' ', '')
+    if '억원' in t:
+        return 1e8
+    if '백만원' in t:
+        return 1e6
+    if '천원' in t:
+        return 1e3
+    if '원' in t:
+        return 1.0
+    return None
+
+
+def _find_revenue_table_with_unit(root):
+    """문서 트리를 순서대로 훑어, 사업보고서 "4. 매출 및 수주상황 > 가. 매출실적"의
+    표준 표(헤더에 '매출유형'과 '품목'을 모두 포함하는 표 - 거의 모든 회사가
+    같은 서식을 쓴다)를 찾는다. 표 직전에 등장한 "(단위 : 억원)" 같은 단위
+    표기도 함께 추적해 반환한다.
     """
-    exclude_patterns = exclude_patterns or []
-    seen = set()
-    by_axes = {}  # axes_key(frozenset of 1 dim) -> {member_label: value}
-
+    pending_unit = None
     for el in root.iter():
         local = _local_tag(el.tag).lower()
-        if not any(p in local for p in tag_patterns):
-            continue
-        if any(p in local for p in exclude_patterns):
-            continue
-        ctx_ref = el.get('contextRef')
-        if not ctx_ref or ctx_ref not in duration_ctx:
-            continue
-        ctx_info = duration_ctx[ctx_ref]
-        # 연결/별도 범위 axis(ConsolidatedAndSeparateFinancialStatementsAxis)는
-        # _xbrl_build_duration_contexts 단계에서 fs_div로 이미 필터링되어 모든
-        # context가 같은 범위 멤버만 가지므로, "진짜 차원"이 아니라 부수적으로
-        # 함께 태깅된 축이다. 이걸 axes_key에 포함시키면 세그먼트축 + 범위축
-        # 두 개로 잡혀 단일축 조건(len==1)에 걸려 실제 세그먼트 데이터가 통째로
-        # 제외되는 문제가 있었다(삼성전자 등 대형 연결 공시에서 흔히 발생) —
-        # 따라서 범위축은 제외하고 나머지 축만으로 단일축 여부를 판단한다.
-        raw_axes = ctx_info.get('axes', frozenset())
-        axes_key = frozenset(
-            ax for ax in raw_axes if not ax.lower().endswith(_CONSOLIDATED_SCOPE_AXIS_SUFFIX)
-        )
-        if len(axes_key) != 1:
-            continue
-        text = (el.text or '').strip()
-        if not text:
-            continue
-        try:
-            val = abs(float(text.replace(',', '')))
-        except ValueError:
-            continue
-        if val == 0:
-            continue
-        dedup_key = (_local_tag(el.tag), ctx_ref)
-        if dedup_key in seen:
-            continue
-        seen.add(dedup_key)
-
-        member_qname = None
-        for m in ctx_info.get('members', []):
-            dim, _, member_text = m.partition('=')
-            if frozenset([dim]) == axes_key:
-                member_qname = member_text
-                break
-        if not member_qname:
-            continue
-        bucket = by_axes.setdefault(axes_key, {})
-        bucket[member_qname] = bucket.get(member_qname, 0.0) + val
-
-    if not by_axes:
-        return None, {}
-
-    def axis_local(ax):
-        return next(iter(ax)).lower()
-
-    segment_axes = [ax for ax in by_axes if any(h in axis_local(ax) for h in _SEGMENT_AXIS_HINTS)]
-    candidates = segment_axes if segment_axes else list(by_axes.keys())
-    chosen = max(candidates, key=lambda ax: len(by_axes[ax]))
-    return next(iter(chosen)), by_axes[chosen]
+        if local == 'table':
+            rows = [tr for tr in el if _local_tag(tr.tag).lower() == 'tr']
+            if not rows:
+                continue
+            header_cells = [td for td in rows[0] if _local_tag(td.tag).lower() in ('td', 'th')]
+            header_text = ' '.join(_cell_text(td) for td in header_cells)
+            if '매출유형' in header_text and '품목' in header_text:
+                return el, pending_unit
+        else:
+            txt = (el.text or '').strip()
+            if txt and '단위' in txt:
+                m = _UNIT_TEXT_RE.search(txt)
+                if m:
+                    pending_unit = m.group(1)
+    return None, None
 
 
-def _qname_to_label_id(qname):
-    """'dart:DXMember' -> 'dart_DXMember' (label linkbase의 loc href #fragment 규칙)"""
-    if ':' in qname:
-        prefix, local = qname.split(':', 1)
-        return f"{prefix}_{local}"
-    return qname
+def _parse_revenue_table(table):
+    """매출실적 표의 TABLE 엘리먼트에서 {부문명: 당기 매출액} 을 추출한다.
 
+    부문 칸은 같은 부문에 속한 매출유형/품목 행들에 걸쳐 ROWSPAN으로 병합돼
+    있는 경우가 많아, 해당 칸이 없는(병합된) 행은 ElementTree 상에서 그
+    칸의 <TD> 자체가 통째로 빠져 있다. 따라서 행의 칸 수가 헤더보다 적으면
+    그만큼 앞쪽(부문 쪽)에 빈 칸을 채워 넣어 칼럼 위치를 맞추고, 빈 부문
+    칸은 바로 위 행에서 마지막으로 본 부문명을 그대로 사용한다(rowspan
+    carry-forward). 같은 부문에 여러 행(품목별)이 있으면 합산한다.
 
-_XLINK_NS = '{http://www.w3.org/1999/xlink}'
-_XML_NS = '{http://www.w3.org/XML/1998/namespace}'
-
-
-def _parse_label_linkbase(content):
-    """XBRL label linkbase(_lab.xml)를 파싱해 {element_id: 한글 라벨} 매핑을 만든다.
-    실패하거나 한글 라벨이 없으면 빈 dict를 반환한다."""
-    try:
-        root = ET.fromstring(content)
-    except ET.ParseError:
+    헤더의 "제NN기" 칼럼 중 가장 왼쪽(=당기, 가장 최근 연도) 칼럼 값만
+    사용한다 — 비교공시 연도(전기/전전기)는 그 연도의 사업보고서를 따로
+    조회할 때 해당 연도 문서의 당기 칼럼에서 가져오는 것이 더 정확하다.
+    """
+    rows = [tr for tr in table if _local_tag(tr.tag).lower() == 'tr']
+    if not rows:
         return {}
 
-    loc_to_elem = {}   # xlink:label(loc) -> element id (href의 # 뒷부분)
-    label_text = {}    # xlink:label(label) -> 텍스트
-    arcs = []          # (from, to)
+    header_cells = [td for td in rows[0] if _local_tag(td.tag).lower() in ('td', 'th')]
+    header_texts = [_cell_text(td) for td in header_cells]
+    period_col = next((i for i, t in enumerate(header_texts) if _PERIOD_HEADER_RE.search(t)), None)
+    if period_col is None:
+        return {}
 
-    for el in root.iter():
-        lt = _local_tag(el.tag)
-        if lt == 'loc':
-            href = el.get(f'{_XLINK_NS}href', '')
-            frag = href.rsplit('#', 1)[-1] if '#' in href else href
-            lbl = el.get(f'{_XLINK_NS}label')
-            if lbl:
-                loc_to_elem[lbl] = frag
-        elif lt == 'label':
-            lbl = el.get(f'{_XLINK_NS}label')
-            lang = el.get(f'{_XML_NS}lang', '')
-            role = el.get(f'{_XLINK_NS}role', '')
-            if lbl and lang.lower().startswith('ko') and 'label' in role:
-                label_text[lbl] = (el.text or '').strip()
-        elif lt == 'labelArc':
-            frm = el.get(f'{_XLINK_NS}from')
-            to = el.get(f'{_XLINK_NS}to')
-            if frm and to:
-                arcs.append((frm, to))
+    totals = {}
+    last_division = None
+    for tr in rows[1:]:
+        cells = [td for td in tr if _local_tag(td.tag).lower() in ('td', 'th')]
+        if not cells:
+            continue
+        texts = [_cell_text(td) for td in cells]
+        n_missing = len(header_cells) - len(cells)
+        if n_missing > 0:
+            texts = [''] * n_missing + texts
+        elif n_missing < 0:
+            continue
 
-    elem_to_ko = {}
-    for frm, to in arcs:
-        elem_id = loc_to_elem.get(frm)
-        ko = label_text.get(to)
-        if elem_id and ko:
-            elem_to_ko[elem_id] = ko
-    return elem_to_ko
+        division = texts[0].strip() or last_division
+        if not division:
+            continue
+        last_division = division
+        if period_col >= len(texts):
+            continue
 
-
-def _clean_member_label(qname):
-    """라벨 linkbase에 없을 때 쓰는 fallback: 'dart:DXMember' -> 'DX'"""
-    label = qname.split(':', 1)[-1]
-    if label.endswith('Member'):
-        label = label[:-len('Member')]
-    return label or qname
+        val_text = texts[period_col].replace(',', '').replace(' ', '')
+        is_negative = val_text.startswith('△') or val_text.startswith('-')
+        val_text = val_text.lstrip('△-')
+        if not val_text:
+            continue
+        try:
+            val = float(val_text)
+        except ValueError:
+            continue
+        if is_negative:
+            continue  # 부문간 내부거래 제거 등 음수 조정행은 매출이 아니므로 제외
+        if any(k in division for k in _SEGMENT_ROW_EXCLUDE):
+            continue
+        totals[division] = totals.get(division, 0.0) + val
+    return totals
 
 
 def get_business_segments(corp_code, year, api_key=None, report_type='11011', fs_div='CFS', debug=None):
-    """XBRL 주석(영업부문 정보, IFRS 8 OperatingSegmentsAxis)에서 사업부문별
-    매출액을 추출한다. 사업보고서의 "매출 및 수주상황"이 아니라 재무제표
-    주석(세그먼트 정보)을 사용한다 — DART OpenAPI에는 "매출 및 수주상황"을
-    구조화된 형태로 주는 엔드포인트가 없기 때문이다.
+    """사업보고서 원문(document.xml)에서 "4. 매출 및 수주상황 > 가. 매출실적"
+    표를 직접 파싱해 사업부문별 매출액을 추출한다.
 
-    실패하거나 세그먼트가 1개뿐이면(=의미있는 분할이 없으면) 빈 dict를
-    반환한다. 성공 시 {세그먼트명: 매출액(원)} 형태로 반환한다.
+    재무제표 XBRL 주석(IFRS 8 영업부문 정보)을 먼저 시도해봤지만, 그 주석은
+    DX/DS 같은 사업부문이 아니라 종속회사 단위로 차원화된 경우가 많아(연결
+    대상 법인별 매출 disclosure) 사용자가 원하는 "매출 및 수주상황"의 사업
+    부문 구분과는 다른 결과를 준다는 것이 확인되어, 사업보고서 본문 표를
+    직접 읽는 방식으로 변경했다. DART OpenAPI에는 이 표를 구조화된 형태로
+    주는 엔드포인트가 없어, 원문 문서(document.xml)를 받아 표를 파싱한다.
 
-    debug에 dict를 넘기면 어느 단계에서 실패했는지/어떤 axis 후보들이
-    발견됐는지를 채워준다 (rcept_no 못 찾음 / zip 아님 / 인스턴스에 매출
-    태그 없음 / 후보 axis는 있으나 멤버 1개뿐이라 버림 등을 구분).
+    실패하거나 부문이 1개뿐이면(=의미있는 분할이 없으면) 빈 dict를 반환한다.
+    성공 시 {부문명: 매출액(원)} 형태로 반환한다.
+
+    debug에 dict를 넘기면 어느 단계에서 실패했는지를 채워준다.
     """
     if debug is None:
         debug = {}
@@ -1312,8 +1276,8 @@ def get_business_segments(corp_code, year, api_key=None, report_type='11011', fs
             debug['stage'] = 'rcept_no_not_found'
             return {}
 
-        url = f"{BASE_URL}/fnlttXbrl.xml"
-        params = {"crtfc_key": key, "rcept_no": rcept_no, "reprt_code": report_type}
+        url = f"{BASE_URL}/document.xml"
+        params = {"crtfc_key": key, "rcept_no": rcept_no}
         resp = requests.get(url, params=params, timeout=60)
         resp.raise_for_status()
 
@@ -1321,59 +1285,40 @@ def get_business_segments(corp_code, year, api_key=None, report_type='11011', fs
             zf = zipfile.ZipFile(io.BytesIO(resp.content))
         except zipfile.BadZipFile:
             debug['stage'] = 'not_a_zip'
+            debug['detail'] = resp.content[:300].decode('utf-8', errors='replace')
             return {}
 
-        xbrl_filenames = [n for n in zf.namelist() if n.lower().endswith(('.xbrl', '.xml'))]
-        label_filenames = [n for n in xbrl_filenames if 'lab' in n.lower()]
-        instance_filenames = [n for n in xbrl_filenames if n not in label_filenames]
-        debug['instance_filenames'] = instance_filenames
-
-        elem_to_ko = {}
-        for fname in label_filenames:
-            try:
-                elem_to_ko.update(_parse_label_linkbase(zf.read(fname)))
-            except KeyError:
-                continue
-
-        best_axis_member_count = 0
-        best_segments = {}
-        best_axis_str = None
-        all_candidate_axes = {}  # 파일 전체에서 발견된 모든 axis 후보 (진단용)
-        for fname in instance_filenames:
-            try:
-                root = ET.fromstring(zf.read(fname))
-            except (ET.ParseError, KeyError):
-                continue
-
-            duration_ctx = _xbrl_build_duration_contexts(root, target_year=year, fs_div=fs_div)
-            if not duration_ctx:
-                debug.setdefault('no_duration_ctx_files', []).append(fname)
-                continue
-
-            axis_str, seg_dict = _xbrl_extract_segment_revenue(
-                root, duration_ctx, _XBRL_REVENUE_TAG_PATTERNS, _XBRL_REVENUE_EXCLUDE_PATTERNS,
-            )
-            if axis_str:
-                all_candidate_axes[axis_str] = len(seg_dict)
-            if len(seg_dict) > best_axis_member_count:
-                best_axis_member_count = len(seg_dict)
-                best_segments = seg_dict
-                best_axis_str = axis_str
-
-        debug['candidate_axes'] = all_candidate_axes
-        debug['chosen_axis'] = best_axis_str
-        debug['chosen_member_count'] = best_axis_member_count
-
-        if best_axis_member_count < 2:
-            debug['stage'] = 'fewer_than_2_segments_found'
+        xml_filenames = [n for n in zf.namelist() if n.lower().endswith('.xml')]
+        debug['document_filenames'] = xml_filenames
+        if not xml_filenames:
+            debug['stage'] = 'zip_has_no_xml'
             return {}
 
-        debug['stage'] = 'ok'
-        result = {}
-        for qname, val in best_segments.items():
-            label = elem_to_ko.get(_qname_to_label_id(qname)) or _clean_member_label(qname)
-            result[label] = result.get(label, 0.0) + val
-        return result
+        for fname in xml_filenames:
+            raw = zf.read(fname)
+            try:
+                root = ET.fromstring(raw)
+            except ET.ParseError:
+                try:
+                    root = ET.fromstring(raw.decode('cp949', errors='replace').encode('utf-8'))
+                except ET.ParseError as e:
+                    debug.setdefault('parse_errors', []).append(f"{fname}: {e}")
+                    continue
+
+            table, unit_text = _find_revenue_table_with_unit(root)
+            if table is None:
+                continue
+            debug['unit_text'] = unit_text
+            debug['source_file'] = fname
+            multiplier = _unit_text_to_multiplier(unit_text) or 1e8  # 표기 못 찾으면 관행상 억원 단위로 간주
+            segments = _parse_revenue_table(table)
+            debug['raw_segments'] = segments
+            if len(segments) >= 2:
+                debug['stage'] = 'ok'
+                return {name: val * multiplier for name, val in segments.items()}
+
+        debug['stage'] = 'no_matching_table_found'
+        return {}
     except Exception as e:
         debug['stage'] = 'exception'
         debug['detail'] = f"{type(e).__name__}: {e}"
