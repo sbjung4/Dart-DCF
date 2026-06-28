@@ -1205,6 +1205,19 @@ def _normalize_ws(s):
     return re.sub(r'\s+', '', s or '')
 
 
+def _table_rows(table):
+    """TABLE 엘리먼트에서 행들을 찾는다. DART 사업보고서 원문은 HTML 스타일
+    (TABLE>TR>TD)뿐 아니라 CALS 표 모델(TABLE>TGROUP>THEAD|TBODY>ROW>ENTRY)로도
+    나오므로, 직계 자식이 아니라 하위 전체를 훑어 'tr'/'row' 태그를 찾는다."""
+    return [el for el in table.iter() if el is not table and _local_tag(el.tag).lower() in ('tr', 'row')]
+
+
+def _row_cells(row):
+    """행 엘리먼트에서 칸들을 찾는다. HTML 스타일 td/th와 CALS 스타일 entry를
+    모두 인식한다."""
+    return [c for c in row if _local_tag(c.tag).lower() in ('td', 'th', 'entry')]
+
+
 def _sample_table_headers(root, limit=15):
     """진단용: 문서에서 발견된 표들의 헤더 텍스트를 일부 수집해 반환한다.
     매칭에 실패했을 때, 실제 문서의 표 헤더가 어떤 모양인지 확인하기 위함."""
@@ -1212,11 +1225,10 @@ def _sample_table_headers(root, limit=15):
     for el in root.iter():
         if _local_tag(el.tag).lower() != 'table':
             continue
-        rows = [tr for tr in el if _local_tag(tr.tag).lower() == 'tr']
+        rows = _table_rows(el)
         if not rows:
             continue
-        header_cells = [td for td in rows[0] if _local_tag(td.tag).lower() in ('td', 'th')]
-        header_texts = [_cell_text(td) for td in header_cells]
+        header_texts = [_cell_text(td) for td in _row_cells(rows[0])]
         if any(t for t in header_texts):
             samples.append(header_texts)
         if len(samples) >= limit:
@@ -1250,11 +1262,10 @@ def _find_revenue_table_with_unit(root):
     for el in root.iter():
         local = _local_tag(el.tag).lower()
         if local == 'table':
-            rows = [tr for tr in el if _local_tag(tr.tag).lower() == 'tr']
+            rows = _table_rows(el)
             if not rows:
                 continue
-            header_cells = [td for td in rows[0] if _local_tag(td.tag).lower() in ('td', 'th')]
-            header_texts = [_cell_text(td) for td in header_cells]
+            header_texts = [_cell_text(td) for td in _row_cells(rows[0])]
             header_norm = _normalize_ws(' '.join(header_texts))
             if '매출유형' in header_norm and '품목' in header_norm:
                 return el, pending_unit
@@ -1297,11 +1308,11 @@ def _parse_revenue_table(table):
     사용한다 — 비교공시 연도(전기/전전기)는 그 연도의 사업보고서를 따로
     조회할 때 해당 연도 문서의 당기 칼럼에서 가져오는 것이 더 정확하다.
     """
-    rows = [tr for tr in table if _local_tag(tr.tag).lower() == 'tr']
+    rows = _table_rows(table)
     if not rows:
         return {}
 
-    header_cells = [td for td in rows[0] if _local_tag(td.tag).lower() in ('td', 'th')]
+    header_cells = _row_cells(rows[0])
     header_texts = [_cell_text(td) for td in header_cells]
     period_col = next((i for i, t in enumerate(header_texts) if _PERIOD_HEADER_RE.search(t)), None)
     if period_col is None:
@@ -1310,7 +1321,7 @@ def _parse_revenue_table(table):
     totals = {}
     last_division = None
     for tr in rows[1:]:
-        cells = [td for td in tr if _local_tag(td.tag).lower() in ('td', 'th')]
+        cells = _row_cells(tr)
         if not cells:
             continue
         texts = [_cell_text(td) for td in cells]
