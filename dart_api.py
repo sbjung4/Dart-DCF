@@ -1138,16 +1138,21 @@ def get_da_capex_from_xbrl_notes(corp_code, year, api_key, report_type='11011', 
 
 _INVALID_XML_CHARS_RE = re.compile('[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]')
 _BARE_AMP_RE = re.compile(r'&(?!amp;|lt;|gt;|quot;|apos;|#\d+;|#x[0-9a-fA-F]+;)')
+# 한글 보고서 원문에는 "<주1>", "<비교표시>"처럼 '<' '>'를 괄호 문장부호(낫표)로
+# 그대로 쓴 경우가 흔하다. 실제 XML 태그는 항상 '<' 바로 뒤에 영문자/'_'/'!'
+# (주석,CDATA)/'?'(PI)/'/' (닫는 태그)가 오므로, 그 외의 경우(숫자/한글/공백 등이
+# 바로 뒤따르는 '<')는 태그가 아니라 텍스트로 보고 escape한다.
+_RAW_LT_RE = re.compile(r'<(?![A-Za-z_!?/])')
 
 
 def _lenient_parse_xml(raw):
-    """DART 사업보고서 원문(document.xml)은 잘못 escape된 '&' (예: "R&D",
-    "AT&T" 등 실제 HWP/한글 문서에서 그대로 넘어온 텍스트)나 XML 1.0에서
-    허용하지 않는 제어문자가 섞여 있어, 표준 인코딩(UTF-8)으로 디코딩해도
-    ET.fromstring이 "not well-formed (invalid token)"으로 실패하는 경우가
-    매우 흔하다. 인코딩 후보(UTF-8/CP949/EUC-KR)와 정제(제어문자 제거 +
-    잘못된 '&' escape 보정) 조합을 순서대로 시도해 가장 먼저 성공하는
-    결과를 반환한다. 전부 실패하면 마지막 ParseError를 그대로 올린다.
+    """DART 사업보고서 원문(document.xml)은 잘못 escape된 '&'/'<' (예: "R&D",
+    "<주1>"처럼 HWP/한글 문서에서 그대로 넘어온 텍스트)나 XML 1.0에서 허용하지
+    않는 제어문자가 섞여 있어, 표준 인코딩(UTF-8)으로 디코딩해도 ET.fromstring이
+    "not well-formed (invalid token)"으로 실패하는 경우가 매우 흔하다. 인코딩
+    후보(UTF-8/CP949/EUC-KR)와 정제(제어문자 제거 + 잘못된 '&'/'<' escape 보정)
+    조합을 순서대로 시도해 가장 먼저 성공하는 결과를 반환한다. 전부 실패하면
+    마지막 ParseError를 그대로 올린다.
     """
     texts = []
     for enc in ('utf-8', 'cp949', 'euc-kr'):
@@ -1161,6 +1166,7 @@ def _lenient_parse_xml(raw):
     last_err = None
     for text in texts:
         cleaned = _INVALID_XML_CHARS_RE.sub('', text)
+        cleaned = _RAW_LT_RE.sub('&lt;', cleaned)
         cleaned = _BARE_AMP_RE.sub('&amp;', cleaned)
         for candidate in (text, cleaned):
             try:
@@ -1192,13 +1198,32 @@ def _unit_text_to_multiplier(unit_text):
     return None
 
 
+_REVENUE_SECTION_HEADING_HINTS = ('매출 및 수주상황', '매출실적', '매출 실적')
+
+
+def _normalize_ws(s):
+    return re.sub(r'\s+', '', s or '')
+
+
 def _find_revenue_table_with_unit(root):
     """문서 트리를 순서대로 훑어, 사업보고서 "4. 매출 및 수주상황 > 가. 매출실적"의
-    표준 표(헤더에 '매출유형'과 '품목'을 모두 포함하는 표 - 거의 모든 회사가
-    같은 서식을 쓴다)를 찾는다. 표 직전에 등장한 "(단위 : 억원)" 같은 단위
-    표기도 함께 추적해 반환한다.
+    표를 찾는다. 표 직전에 등장한 "(단위 : 억원)" 같은 단위 표기도 함께
+    추적해 반환한다.
+
+    1차로는 헤더에 '매출유형'과 '품목'을 모두 포함하는 표준 서식을 찾는다
+    (거의 모든 회사가 같은 서식을 씀). 헤더 셀 텍스트는 줄바꿈으로
+    "매출\n유형"처럼 쪼개져 들어오는 경우가 있어, 공백/줄바꿈을 모두 제거한
+    뒤 부분일치를 검사한다.
+
+    표준 서식과 정확히 안 맞는 회사를 위해, "매출 및 수주상황"/"매출실적"
+    제목이 먼저 나온 뒤 등장하는, "제NN기" 형태의 기수 컬럼을 가진 첫 번째
+    표를 fallback으로 채택한다.
     """
     pending_unit = None
+    after_heading = False
+    fallback_table = None
+    fallback_unit = None
+
     for el in root.iter():
         local = _local_tag(el.tag).lower()
         if local == 'table':
@@ -1206,16 +1231,25 @@ def _find_revenue_table_with_unit(root):
             if not rows:
                 continue
             header_cells = [td for td in rows[0] if _local_tag(td.tag).lower() in ('td', 'th')]
-            header_text = ' '.join(_cell_text(td) for td in header_cells)
-            if '매출유형' in header_text and '품목' in header_text:
+            header_texts = [_cell_text(td) for td in header_cells]
+            header_norm = _normalize_ws(' '.join(header_texts))
+            if '매출유형' in header_norm and '품목' in header_norm:
                 return el, pending_unit
+            if after_heading and fallback_table is None and any(
+                _PERIOD_HEADER_RE.search(t) for t in header_texts
+            ):
+                fallback_table = el
+                fallback_unit = pending_unit
         else:
             txt = (el.text or '').strip()
-            if txt and '단위' in txt:
-                m = _UNIT_TEXT_RE.search(txt)
-                if m:
-                    pending_unit = m.group(1)
-    return None, None
+            if txt:
+                if any(h in txt for h in _REVENUE_SECTION_HEADING_HINTS):
+                    after_heading = True
+                if '단위' in txt:
+                    m = _UNIT_TEXT_RE.search(txt)
+                    if m:
+                        pending_unit = m.group(1)
+    return fallback_table, fallback_unit
 
 
 def _parse_revenue_table(table):
