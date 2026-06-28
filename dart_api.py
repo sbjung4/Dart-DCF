@@ -1294,6 +1294,26 @@ def _find_revenue_table_with_unit(root):
     return loose_fallback_table, loose_fallback_unit
 
 
+def _table_diagnostic(table, max_rows=6):
+    """진단용: 매칭된 표의 헤더/데이터 행 원문을 그대로 담아 반환한다.
+    표는 찾았는데 _parse_revenue_table이 부문을 하나도 못 뽑아냈을 때,
+    실제 표 모양(컬럼 구성·기수 표기 등)을 확인하기 위함."""
+    rows = _table_rows(table)
+    if not rows:
+        return {'header': [], 'rows': [], 'period_col': None}
+    all_row_texts = [[_cell_text(td) for td in _row_cells(tr)] for tr in rows[:1 + max_rows]]
+    period_row_idx = next(
+        (i for i, texts in enumerate(all_row_texts) if any(_PERIOD_HEADER_RE.search(t) for t in texts)),
+        None,
+    )
+    header_texts = all_row_texts[period_row_idx] if period_row_idx is not None else (all_row_texts[0] if all_row_texts else [])
+    period_col = (
+        next((i for i, t in enumerate(header_texts) if _PERIOD_HEADER_RE.search(t)), None)
+        if period_row_idx is not None else None
+    )
+    return {'header_rows': all_row_texts, 'header_row_idx': period_row_idx, 'period_col': period_col}
+
+
 def _parse_revenue_table(table):
     """매출실적 표의 TABLE 엘리먼트에서 {부문명: 당기 매출액} 을 추출한다.
 
@@ -1312,15 +1332,30 @@ def _parse_revenue_table(table):
     if not rows:
         return {}
 
-    header_cells = _row_cells(rows[0])
-    header_texts = [_cell_text(td) for td in header_cells]
-    period_col = next((i for i, t in enumerate(header_texts) if _PERIOD_HEADER_RE.search(t)), None)
-    if period_col is None:
+    # 헤더가 "사업부문/매출유형/품목"과 "제NN기" 기수 표기가 한 행에 같이
+    # 있는 경우가 많지만, 회사에 따라 헤더가 두 행으로 나뉘어(예: 1행
+    # "매출유형|품목", 2행 "제19기|제18기") "제NN기" 표기가 rows[0]이 아닌
+    # 다음 행에 나오는 경우도 있다. rows[0]만 보면 이런 회사는 period_col을
+    # 못 찾아 통째로 빈 결과가 나오므로, "제NN기" 패턴이 처음 등장하는 행을
+    # 헤더로 채택한다.
+    header_row_idx = None
+    header_cells = None
+    header_texts = None
+    for i, tr in enumerate(rows):
+        cells = _row_cells(tr)
+        texts = [_cell_text(td) for td in cells]
+        if any(_PERIOD_HEADER_RE.search(t) for t in texts):
+            header_row_idx = i
+            header_cells = cells
+            header_texts = texts
+            break
+    if header_row_idx is None:
         return {}
+    period_col = next(i for i, t in enumerate(header_texts) if _PERIOD_HEADER_RE.search(t))
 
     totals = {}
     last_division = None
-    for tr in rows[1:]:
+    for tr in rows[header_row_idx + 1:]:
         cells = _row_cells(tr)
         if not cells:
             continue
@@ -1424,6 +1459,7 @@ def get_business_segments(corp_code, year, api_key=None, report_type='11011', fs
             if len(segments) >= 2:
                 debug['stage'] = 'ok'
                 return {name: val * multiplier for name, val in segments.items()}
+            debug.setdefault('matched_table_diagnostics', {})[fname] = _table_diagnostic(table)
 
         debug['stage'] = 'no_matching_table_found'
         return {}
