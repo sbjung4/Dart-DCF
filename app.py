@@ -772,6 +772,19 @@ elif page == 'DCF 가정 입력':
         base_rev = sum(s['base'] for s in segments)
         growth_rates = [(sum(s['base'] * s['growth_rates'][i] for s in segments) / max(base_rev,1)) for i in range(n)]
 
+        # 미리보기: 연도별 사업부문별 매출액 + 합계
+        st.markdown(f"**📊 사업부문별 매출액 추정 미리보기 ({u})**")
+        seg_values = {seg['name']: seg['base'] for seg in segments}
+        rev_preview = {}
+        for i in range(n):
+            for seg in segments:
+                seg_values[seg['name']] = seg_values[seg['name']] * (1 + seg['growth_rates'][i] / 100)
+            total = sum(seg_values.values())
+            col_data = {seg['name']: f"{seg_values[seg['name']]/div:,.0f}" for seg in segments}
+            col_data['합계'] = f"{total/div:,.0f}"
+            rev_preview[str(proj_years[i])] = col_data
+        show_table(pd.DataFrame(rev_preview), use_container_width=True)
+
     st.divider()
 
     # ── 2. 비용 가정 ─────────────────────────────────────────────────────────
