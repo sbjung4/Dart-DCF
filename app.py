@@ -699,9 +699,13 @@ elif page == 'DCF 가정 입력':
         hist_rev_data[str(yr)] = row
         prev_rev = rev
     show_table(pd.DataFrame(hist_rev_data), use_container_width=True)
-    if not all_hist_segments:
-        seg_dbg = hist.get('segment_debug', {})
-        with st.expander("⚠️ 사업부문별 매출을 찾지 못했습니다 — 진단 정보"):
+    seg_dbg = hist.get('segment_debug', {})
+    expander_title = (
+        "⚠️ 사업부문별 매출을 찾지 못했습니다 — 진단 정보" if not all_hist_segments
+        else "🔍 사업부문별 매출 추출 진단 정보 (값이 이상하면 펼쳐서 확인)"
+    )
+    if seg_dbg:
+        with st.expander(expander_title, expanded=not all_hist_segments):
             for yr in hist_years:
                 dbg = seg_dbg.get(yr)
                 if dbg:

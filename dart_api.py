@@ -1178,7 +1178,7 @@ def _lenient_parse_xml(raw):
 
 _UNIT_TEXT_RE = re.compile(r'단위\s*[:：]\s*([^()\[\]]+)')
 _PERIOD_HEADER_RE = re.compile(r'제\s*\d+\s*기')
-_SEGMENT_ROW_EXCLUDE = ('합계', '총계', '소계', '내부거래')
+_SEGMENT_ROW_EXCLUDE = ('합계', '총계', '소계')
 
 
 def _cell_text(el):
@@ -1327,6 +1327,12 @@ def _parse_revenue_table(table):
     헤더의 "제NN기" 칼럼 중 가장 왼쪽(=당기, 가장 최근 연도) 칼럼 값만
     사용한다 — 비교공시 연도(전기/전전기)는 그 연도의 사업보고서를 따로
     조회할 때 해당 연도 문서의 당기 칼럼에서 가져오는 것이 더 정확하다.
+
+    "기타(부문간 내부거래 제거 등)"처럼 음수(△ 표기)로 나오는 조정 행도
+    그대로 부문에 포함시킨다 — 이를 빼고 합치면 실제 총매출(=각 부문
+    합계 - 내부거래)보다 부풀려진 값이 나오므로, DCF에서 각 부문을 따로
+    키워 합산할 때도 이 조정행이 같이 성장해야 총계가 어긋나지 않는다.
+    합계/총계/소계처럼 이미 다른 행들의 합산인 행만 제외한다.
     """
     rows = _table_rows(table)
     if not rows:
@@ -1405,7 +1411,7 @@ def _parse_revenue_table(table):
         except ValueError:
             continue
         if is_negative:
-            continue  # 부문간 내부거래 제거 등 음수 조정행은 매출이 아니므로 제외
+            val = -val
         if any(k in _normalize_ws(division) for k in _SEGMENT_ROW_EXCLUDE):
             continue
         totals[division] = totals.get(division, 0.0) + val
@@ -1478,6 +1484,7 @@ def get_business_segments(corp_code, year, api_key=None, report_type='11011', fs
             multiplier = _unit_text_to_multiplier(unit_text) or 1e8  # 표기 못 찾으면 관행상 억원 단위로 간주
             segments = _parse_revenue_table(table)
             debug['raw_segments'] = segments
+            debug['table_diagnostic'] = _table_diagnostic(table)
             if len(segments) >= 2:
                 debug['stage'] = 'ok'
                 return {name: val * multiplier for name, val in segments.items()}
