@@ -1173,7 +1173,17 @@ def _xbrl_extract_segment_revenue(root, duration_ctx, tag_patterns, exclude_patt
         if not ctx_ref or ctx_ref not in duration_ctx:
             continue
         ctx_info = duration_ctx[ctx_ref]
-        axes_key = ctx_info.get('axes', frozenset())
+        # 연결/별도 범위 axis(ConsolidatedAndSeparateFinancialStatementsAxis)는
+        # _xbrl_build_duration_contexts 단계에서 fs_div로 이미 필터링되어 모든
+        # context가 같은 범위 멤버만 가지므로, "진짜 차원"이 아니라 부수적으로
+        # 함께 태깅된 축이다. 이걸 axes_key에 포함시키면 세그먼트축 + 범위축
+        # 두 개로 잡혀 단일축 조건(len==1)에 걸려 실제 세그먼트 데이터가 통째로
+        # 제외되는 문제가 있었다(삼성전자 등 대형 연결 공시에서 흔히 발생) —
+        # 따라서 범위축은 제외하고 나머지 축만으로 단일축 여부를 판단한다.
+        raw_axes = ctx_info.get('axes', frozenset())
+        axes_key = frozenset(
+            ax for ax in raw_axes if not ax.lower().endswith(_CONSOLIDATED_SCOPE_AXIS_SUFFIX)
+        )
         if len(axes_key) != 1:
             continue
         text = (el.text or '').strip()
@@ -1274,7 +1284,7 @@ def _clean_member_label(qname):
     return label or qname
 
 
-def get_business_segments(corp_code, year, api_key=None, report_type='11011', fs_div='CFS'):
+def get_business_segments(corp_code, year, api_key=None, report_type='11011', fs_div='CFS', debug=None):
     """XBRL 주석(영업부문 정보, IFRS 8 OperatingSegmentsAxis)에서 사업부문별
     매출액을 추출한다. 사업보고서의 "매출 및 수주상황"이 아니라 재무제표
     주석(세그먼트 정보)을 사용한다 — DART OpenAPI에는 "매출 및 수주상황"을
@@ -1282,14 +1292,24 @@ def get_business_segments(corp_code, year, api_key=None, report_type='11011', fs
 
     실패하거나 세그먼트가 1개뿐이면(=의미있는 분할이 없으면) 빈 dict를
     반환한다. 성공 시 {세그먼트명: 매출액(원)} 형태로 반환한다.
+
+    debug에 dict를 넘기면 어느 단계에서 실패했는지/어떤 axis 후보들이
+    발견됐는지를 채워준다 (rcept_no 못 찾음 / zip 아님 / 인스턴스에 매출
+    태그 없음 / 후보 axis는 있으나 멤버 1개뿐이라 버림 등을 구분).
     """
+    if debug is None:
+        debug = {}
+    debug['stage'] = None
     try:
         key = get_dart_api_key(api_key)
         if not key:
+            debug['stage'] = 'no_api_key'
             return {}
 
         rcept_no = _find_rcept_no(corp_code, year, key, report_type)
+        debug['rcept_no'] = rcept_no
         if not rcept_no:
+            debug['stage'] = 'rcept_no_not_found'
             return {}
 
         url = f"{BASE_URL}/fnlttXbrl.xml"
@@ -1300,11 +1320,13 @@ def get_business_segments(corp_code, year, api_key=None, report_type='11011', fs
         try:
             zf = zipfile.ZipFile(io.BytesIO(resp.content))
         except zipfile.BadZipFile:
+            debug['stage'] = 'not_a_zip'
             return {}
 
         xbrl_filenames = [n for n in zf.namelist() if n.lower().endswith(('.xbrl', '.xml'))]
         label_filenames = [n for n in xbrl_filenames if 'lab' in n.lower()]
         instance_filenames = [n for n in xbrl_filenames if n not in label_filenames]
+        debug['instance_filenames'] = instance_filenames
 
         elem_to_ko = {}
         for fname in label_filenames:
@@ -1315,6 +1337,8 @@ def get_business_segments(corp_code, year, api_key=None, report_type='11011', fs
 
         best_axis_member_count = 0
         best_segments = {}
+        best_axis_str = None
+        all_candidate_axes = {}  # 파일 전체에서 발견된 모든 axis 후보 (진단용)
         for fname in instance_filenames:
             try:
                 root = ET.fromstring(zf.read(fname))
@@ -1323,24 +1347,36 @@ def get_business_segments(corp_code, year, api_key=None, report_type='11011', fs
 
             duration_ctx = _xbrl_build_duration_contexts(root, target_year=year, fs_div=fs_div)
             if not duration_ctx:
+                debug.setdefault('no_duration_ctx_files', []).append(fname)
                 continue
 
-            _, seg_dict = _xbrl_extract_segment_revenue(
+            axis_str, seg_dict = _xbrl_extract_segment_revenue(
                 root, duration_ctx, _XBRL_REVENUE_TAG_PATTERNS, _XBRL_REVENUE_EXCLUDE_PATTERNS,
             )
+            if axis_str:
+                all_candidate_axes[axis_str] = len(seg_dict)
             if len(seg_dict) > best_axis_member_count:
                 best_axis_member_count = len(seg_dict)
                 best_segments = seg_dict
+                best_axis_str = axis_str
+
+        debug['candidate_axes'] = all_candidate_axes
+        debug['chosen_axis'] = best_axis_str
+        debug['chosen_member_count'] = best_axis_member_count
 
         if best_axis_member_count < 2:
+            debug['stage'] = 'fewer_than_2_segments_found'
             return {}
 
+        debug['stage'] = 'ok'
         result = {}
         for qname, val in best_segments.items():
             label = elem_to_ko.get(_qname_to_label_id(qname)) or _clean_member_label(qname)
             result[label] = result.get(label, 0.0) + val
         return result
-    except Exception:
+    except Exception as e:
+        debug['stage'] = 'exception'
+        debug['detail'] = f"{type(e).__name__}: {e}"
         return {}
 
 

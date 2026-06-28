@@ -147,7 +147,7 @@ def extract_historical_summary(financial_data: dict, years: list) -> dict:
         # D&A를 XBRL 주석(유형자산 노트)에서 찾아낸 연도 표시용
         'da_source': {}, 'xbrl_debug': {},
         # 사업부문별 매출액 (XBRL 영업부문 주석, IFRS 8 OperatingSegmentsAxis)
-        'segment_revenue': {},
+        'segment_revenue': {}, 'segment_debug': {},
     }
     for yr in years:
         yr_data = financial_data.get(str(yr), {})
@@ -159,6 +159,7 @@ def extract_historical_summary(financial_data: dict, years: list) -> dict:
         summary['da_source'][yr] = yr_data.get('_da_source')
         summary['xbrl_debug'][yr] = yr_data.get('_xbrl_debug')
         summary['segment_revenue'][yr] = yr_data.get('_segments') or {}
+        summary['segment_debug'][yr] = yr_data.get('_segments_debug')
 
         rev = is_data.get('revenue', 0)
         cogs = is_data.get('cogs', 0)
@@ -393,12 +394,15 @@ if page == '기업 검색':
                                 if fs.get('_no_data'):
                                     no_data_years.append(yr)
                                 else:
+                                    seg_debug = {}
                                     try:
                                         fs['_segments'] = get_business_segments(
-                                            corp_code, yr, api_key, report_type='11011', fs_div=fs_div
+                                            corp_code, yr, api_key, report_type='11011', fs_div=fs_div,
+                                            debug=seg_debug,
                                         )
                                     except Exception:
                                         fs['_segments'] = {}
+                                    fs['_segments_debug'] = seg_debug
                             except Exception as e:
                                 st.warning(f"{yr}년 데이터 로드 실패: {str(e)}")
                                 financial_data[str(yr)] = {}
@@ -674,19 +678,35 @@ elif page == 'DCF 가정 입력':
     # ── 1. 매출액 ────────────────────────────────────────────────────────────
     st.subheader("1. 매출액 가정")
 
-    # 과거 3개년 매출 현황
+    # 과거 3개년 매출 현황 (전체 매출 + 사업부문별 매출/비중)
     st.markdown(f"**📊 과거 실적 ({u})**")
+    seg_rev_by_year = hist.get('segment_revenue', {})
+    all_hist_segments = sorted({seg for yr in hist_years for seg in seg_rev_by_year.get(yr, {})})
     hist_rev_data = {}
     prev_rev = None
     for yr in hist_years:
         rev = hist['revenue'].get(yr, 0)
         yoy = safe_div(rev - prev_rev, prev_rev, 0) * 100 if prev_rev else None
-        hist_rev_data[str(yr)] = {
-            f'매출액({u})': f"{rev/div:,.0f}",
+        row = {
+            f'총매출액({u})': f"{rev/div:,.0f}",
             'YoY성장률': f"{yoy:.1f}%" if yoy is not None else "-",
         }
+        seg_data = seg_rev_by_year.get(yr, {})
+        for seg in all_hist_segments:
+            seg_val = seg_data.get(seg, 0)
+            row[f'{seg}({u})'] = f"{seg_val/div:,.0f}" if seg_val else "-"
+            row[f'{seg} 비중'] = f"{safe_div(seg_val, rev, 0)*100:.1f}%" if seg_val else "-"
+        hist_rev_data[str(yr)] = row
         prev_rev = rev
     show_table(pd.DataFrame(hist_rev_data), use_container_width=True)
+    if not all_hist_segments:
+        seg_dbg = hist.get('segment_debug', {})
+        with st.expander("⚠️ 사업부문별 매출을 찾지 못했습니다 — 진단 정보"):
+            for yr in hist_years:
+                dbg = seg_dbg.get(yr)
+                if dbg:
+                    st.write(f"**{yr}년**")
+                    st.json(dbg)
 
     rev_method = st.radio("매출액 방법", ['전체 매출 기준', '사업부문별'], horizontal=True,
                           index=0 if asmp.get('revenue_method','total') == 'total' else 1)
