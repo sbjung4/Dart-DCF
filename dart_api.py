@@ -1390,7 +1390,19 @@ def _parse_revenue_table(table):
         texts = [_cell_text(td) for td in cells]
         n_missing = total_columns - len(cells)
         if n_missing > 0:
-            texts = [''] * n_missing + texts
+            # 칸이 모자란 이유는 두 가지다: (1) 부문 칸 자체가 ROWSPAN으로 위
+            # 행과 병합돼 빠진 경우(부문명을 포함해 전부 모자람) -> 앞쪽에
+            # 빈 칸을 채워 이전 행의 부문명을 그대로 carry-forward 한다.
+            # (2) "기타"/"합계" 행처럼 부문명은 있지만 매출유형/품목 칸이
+            # COLSPAN으로 합쳐지거나 비어서 없는 경우 -> 부문명 칸은 그대로
+            # 두고 그 뒤(매출유형/품목 위치)에 빈 칸을 채워야 당기 매출액
+            # 칸(period_col) 위치가 어긋나지 않는다.
+            trailing_count = total_columns - period_col
+            leading_actual = len(cells) - trailing_count
+            if division_col == 0 and leading_actual >= 1:
+                texts = texts[:1] + [''] * n_missing + texts[1:]
+            else:
+                texts = [''] * n_missing + texts
         elif n_missing < 0:
             continue
 
