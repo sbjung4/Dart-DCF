@@ -1510,6 +1510,164 @@ def get_business_segments(corp_code, year, api_key=None, report_type='11011', fs
         return {}
 
 
+_COST_NATURE_HEADING_KEYWORDS = ('비용의', '성격별', '분류')
+_SGA_HEADING_KEYWORDS = ('판매비와관리비',)
+_COST_NATURE_ROW_EXCLUDE = ('합계', '총계', '소계', '성격별비용')
+_SGA_ROW_EXCLUDE = ('합계', '총계', '소계')
+
+
+def _find_note_table_current_period(root, heading_keywords, period_marker='당기'):
+    """주석 표("비용의 성격별 분류", "판매비와관리비" 등)에서 당기(현재 연도) 표를
+    찾는다. 매출실적표처럼 기수가 한 표 안에 컬럼으로 나란히 있는 게 아니라,
+    "당기"/"전기"/"전전기" 표가 각각 별도의 TABLE로 따로 나온다. 따라서 제목
+    문단이 등장한 뒤 "당기" 문단이 나오고, 그 다음 처음 만나는 표를 채택한다
+    (전기/전전기 표는 건너뛴다 -- 비교연도는 그 연도 사업보고서를 따로 조회할
+    때 당기 표에서 가져오는 것이 더 정확하다)."""
+    pending_unit = None
+    after_heading = False
+    seen_period_marker = False
+    heading_keywords_norm = tuple(_normalize_ws(h) for h in heading_keywords)
+
+    for el in root.iter():
+        local = _local_tag(el.tag).lower()
+        if local == 'table':
+            if after_heading and seen_period_marker:
+                return el, pending_unit
+        else:
+            for txt in ((el.text or '').strip(), (el.tail or '').strip()):
+                if not txt:
+                    continue
+                txt_norm = _normalize_ws(txt)
+                if all(h in txt_norm for h in heading_keywords_norm):
+                    after_heading = True
+                    seen_period_marker = False
+                if after_heading and not seen_period_marker and txt_norm.startswith(period_marker):
+                    seen_period_marker = True
+                if '단위' in txt:
+                    m = _UNIT_TEXT_RE.search(txt)
+                    if m:
+                        pending_unit = m.group(1)
+    return None, None
+
+
+def _parse_note_amount_table(table, exclude_keywords):
+    """주석 표(좌측 칸이 ROWSPAN으로 그룹명과 병합된, 들여쓰기 있는 표)에서
+    {항목명: 금액} 을 추출한다. 각 행의 마지막 칸을 금액으로, 그 앞에서
+    가장 가까운 비어있지 않은 칸을 항목명으로 본다(중간 그룹명 칸들은
+    ROWSPAN으로 병합돼 빠져 있어 보통 칸이 2개뿐이다). exclude_keywords에
+    해당하는 항목명(합계/소계처럼 이미 다른 행들의 합산인 행)은 제외한다."""
+    rows = _table_rows(table)
+    items = {}
+    for tr in rows:
+        cells = _row_cells(tr)
+        texts = [_cell_text(c) for c in cells]
+        if len(texts) < 2:
+            continue
+        amount_text = texts[-1].replace(',', '').replace(' ', '')
+        is_negative = amount_text.startswith('△') or amount_text.startswith('-')
+        amount_text = amount_text.lstrip('△-')
+        if not amount_text:
+            continue
+        try:
+            val = float(amount_text)
+        except ValueError:
+            continue
+        if is_negative:
+            val = -val
+
+        label = None
+        for t in reversed(texts[:-1]):
+            if t.strip():
+                label = t.strip()
+                break
+        if not label:
+            continue
+        if any(k in _normalize_ws(label) for k in exclude_keywords):
+            continue
+        items[label] = items.get(label, 0.0) + val
+    return items
+
+
+def get_cost_breakdown(corp_code, year, api_key=None, report_type='11011', fs_div='CFS', debug=None):
+    """사업보고서 주석 "비용의 성격별 분류"와 "판매비와관리비" 표를 파싱해
+    매출원가(COGS)/판매비와관리비(SG&A)를 항목별(인건비/감가상각비/지급수수료
+    등)로 쪼갠 금액을 반환한다.
+
+    "비용의 성격별 분류" 주석은 매출원가+판관비를 합친 전체 비용을 성격별로
+    보여주고, "판매비와관리비" 주석은 그중 판관비에 해당하는 부분만 항목별로
+    보여준다. 두 표의 항목 이름 체계가 회사마다 다를 수 있어, 우선은 각 표를
+    그대로 파싱해 반환하고 COGS/SG&A 합산·비교는 호출 측(app.py)에서 한다.
+
+    반환: {'expense_by_nature': {항목명: 금액(원)}, 'sga_detail': {항목명: 금액(원)}}
+    실패하면 해당 항목은 빈 dict가 된다.
+    """
+    if debug is None:
+        debug = {}
+    result = {'expense_by_nature': {}, 'sga_detail': {}}
+    try:
+        key = get_dart_api_key(api_key)
+        if not key:
+            debug['stage'] = 'no_api_key'
+            return result
+
+        rcept_no = _find_rcept_no(corp_code, year, key, report_type)
+        debug['rcept_no'] = rcept_no
+        if not rcept_no:
+            debug['stage'] = 'rcept_no_not_found'
+            return result
+
+        url = f"{BASE_URL}/document.xml"
+        params = {"crtfc_key": key, "rcept_no": rcept_no}
+        resp = requests.get(url, params=params, timeout=60)
+        resp.raise_for_status()
+
+        try:
+            zf = zipfile.ZipFile(io.BytesIO(resp.content))
+        except zipfile.BadZipFile:
+            debug['stage'] = 'not_a_zip'
+            return result
+
+        xml_filenames = [n for n in zf.namelist() if n.lower().endswith('.xml')]
+        debug['document_filenames'] = xml_filenames
+
+        for fname in xml_filenames:
+            raw = zf.read(fname)
+            try:
+                root = _lenient_parse_xml(raw)
+            except ET.ParseError:
+                continue
+
+            if not result['expense_by_nature']:
+                table, unit_text = _find_note_table_current_period(root, _COST_NATURE_HEADING_KEYWORDS)
+                if table is not None:
+                    mult = _unit_text_to_multiplier(unit_text) or 1e6
+                    items = _parse_note_amount_table(table, _COST_NATURE_ROW_EXCLUDE)
+                    if items:
+                        result['expense_by_nature'] = {k: v * mult for k, v in items.items()}
+                        debug['expense_by_nature_unit'] = unit_text
+                        debug['expense_by_nature_source_file'] = fname
+
+            if not result['sga_detail']:
+                table, unit_text = _find_note_table_current_period(root, _SGA_HEADING_KEYWORDS)
+                if table is not None:
+                    mult = _unit_text_to_multiplier(unit_text) or 1e6
+                    items = _parse_note_amount_table(table, _SGA_ROW_EXCLUDE)
+                    if items:
+                        result['sga_detail'] = {k: v * mult for k, v in items.items()}
+                        debug['sga_unit'] = unit_text
+                        debug['sga_source_file'] = fname
+
+            if result['expense_by_nature'] and result['sga_detail']:
+                break
+
+        debug['stage'] = 'ok' if (result['expense_by_nature'] or result['sga_detail']) else 'no_matching_table_found'
+        return result
+    except Exception as e:
+        debug['stage'] = 'exception'
+        debug['detail'] = f"{type(e).__name__}: {e}"
+        return result
+
+
 def parse_financial_data(raw_data):
     """Parse raw DART API response data"""
     if not raw_data or 'list' not in raw_data:

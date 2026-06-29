@@ -35,7 +35,7 @@ def _save_api_key(key):
 
 from dart_api import (
     search_company, get_company_info, get_financial_statements,
-    get_business_segments, get_corp_code_list
+    get_business_segments, get_corp_code_list, get_cost_breakdown
 )
 from dcf import DCFModel
 from excel_export import build_excel_workbook
@@ -148,6 +148,8 @@ def extract_historical_summary(financial_data: dict, years: list) -> dict:
         'da_source': {}, 'xbrl_debug': {},
         # 사업부문별 매출액 (XBRL 영업부문 주석, IFRS 8 OperatingSegmentsAxis)
         'segment_revenue': {}, 'segment_debug': {},
+        # 비용 항목별 세부 (주석 "비용의 성격별 분류"/"판매비와관리비")
+        'expense_by_nature': {}, 'sga_detail': {},
     }
     for yr in years:
         yr_data = financial_data.get(str(yr), {})
@@ -160,6 +162,9 @@ def extract_historical_summary(financial_data: dict, years: list) -> dict:
         summary['xbrl_debug'][yr] = yr_data.get('_xbrl_debug')
         summary['segment_revenue'][yr] = yr_data.get('_segments') or {}
         summary['segment_debug'][yr] = yr_data.get('_segments_debug')
+        cost_breakdown = yr_data.get('_cost_breakdown') or {}
+        summary['expense_by_nature'][yr] = cost_breakdown.get('expense_by_nature') or {}
+        summary['sga_detail'][yr] = cost_breakdown.get('sga_detail') or {}
 
         rev = is_data.get('revenue', 0)
         cogs = is_data.get('cogs', 0)
@@ -403,6 +408,16 @@ if page == '기업 검색':
                                     except Exception:
                                         fs['_segments'] = {}
                                     fs['_segments_debug'] = seg_debug
+
+                                    cost_debug = {}
+                                    try:
+                                        fs['_cost_breakdown'] = get_cost_breakdown(
+                                            corp_code, yr, api_key, report_type='11011', fs_div=fs_div,
+                                            debug=cost_debug,
+                                        )
+                                    except Exception:
+                                        fs['_cost_breakdown'] = {'expense_by_nature': {}, 'sga_detail': {}}
+                                    fs['_cost_breakdown_debug'] = cost_debug
                             except Exception as e:
                                 st.warning(f"{yr}년 데이터 로드 실패: {str(e)}")
                                 financial_data[str(yr)] = {}
@@ -711,6 +726,32 @@ elif page == 'DCF 가정 입력':
                 if dbg:
                     st.write(f"**{yr}년**")
                     st.json(dbg)
+
+    # ─── 비용 항목별 세부 (주석 "비용의 성격별 분류"/"판매비와관리비") ──────────
+    expense_by_nature_by_year = hist.get('expense_by_nature', {})
+    sga_detail_by_year = hist.get('sga_detail', {})
+    all_nature_items = sorted({item for yr in hist_years for item in expense_by_nature_by_year.get(yr, {})})
+    all_sga_items = sorted({item for yr in hist_years for item in sga_detail_by_year.get(yr, {})})
+    if all_nature_items or all_sga_items:
+        st.markdown("**🧾 비용 항목별 세부 (주석 기준, 당기)**")
+        if all_nature_items:
+            st.caption("비용의 성격별 분류 (매출원가 + 판매비와관리비 통합)")
+            nature_data = {}
+            for yr in hist_years:
+                items = expense_by_nature_by_year.get(yr, {})
+                row = {item: f"{items.get(item, 0)/div:,.0f}" if items.get(item) else "-" for item in all_nature_items}
+                row[f'합계({u})'] = f"{sum(items.values())/div:,.0f}" if items else "-"
+                nature_data[str(yr)] = row
+            show_table(pd.DataFrame(nature_data), use_container_width=True)
+        if all_sga_items:
+            st.caption("판매비와관리비 항목별 세부")
+            sga_data = {}
+            for yr in hist_years:
+                items = sga_detail_by_year.get(yr, {})
+                row = {item: f"{items.get(item, 0)/div:,.0f}" if items.get(item) else "-" for item in all_sga_items}
+                row[f'합계({u})'] = f"{sum(items.values())/div:,.0f}" if items else "-"
+                sga_data[str(yr)] = row
+            show_table(pd.DataFrame(sga_data), use_container_width=True)
 
     rev_method = st.radio("매출액 방법", ['전체 매출 기준', '사업부문별'], horizontal=True,
                           index=0 if asmp.get('revenue_method','total') == 'total' else 1)
