@@ -727,32 +727,6 @@ elif page == 'DCF 가정 입력':
                     st.write(f"**{yr}년**")
                     st.json(dbg)
 
-    # ─── 비용 항목별 세부 (주석 "비용의 성격별 분류"/"판매비와관리비") ──────────
-    expense_by_nature_by_year = hist.get('expense_by_nature', {})
-    sga_detail_by_year = hist.get('sga_detail', {})
-    all_nature_items = sorted({item for yr in hist_years for item in expense_by_nature_by_year.get(yr, {})})
-    all_sga_items = sorted({item for yr in hist_years for item in sga_detail_by_year.get(yr, {})})
-    if all_nature_items or all_sga_items:
-        st.markdown("**🧾 비용 항목별 세부 (주석 기준, 당기)**")
-        if all_nature_items:
-            st.caption("비용의 성격별 분류 (매출원가 + 판매비와관리비 통합)")
-            nature_data = {}
-            for yr in hist_years:
-                items = expense_by_nature_by_year.get(yr, {})
-                row = {item: f"{items.get(item, 0)/div:,.0f}" if items.get(item) else "-" for item in all_nature_items}
-                row[f'합계({u})'] = f"{sum(items.values())/div:,.0f}" if items else "-"
-                nature_data[str(yr)] = row
-            show_table(pd.DataFrame(nature_data), use_container_width=True)
-        if all_sga_items:
-            st.caption("판매비와관리비 항목별 세부")
-            sga_data = {}
-            for yr in hist_years:
-                items = sga_detail_by_year.get(yr, {})
-                row = {item: f"{items.get(item, 0)/div:,.0f}" if items.get(item) else "-" for item in all_sga_items}
-                row[f'합계({u})'] = f"{sum(items.values())/div:,.0f}" if items else "-"
-                sga_data[str(yr)] = row
-            show_table(pd.DataFrame(sga_data), use_container_width=True)
-
     rev_method = st.radio("매출액 방법", ['전체 매출 기준', '사업부문별'], horizontal=True,
                           index=0 if asmp.get('revenue_method','total') == 'total' else 1)
     asmp['revenue_method'] = 'total' if rev_method == '전체 매출 기준' else 'segment'
@@ -859,6 +833,32 @@ elif page == 'DCF 가정 입력':
         }
     st.markdown("**과거 비용 실적**")
     show_table(pd.DataFrame(cost_hist), use_container_width=True)
+
+    # 비용 항목별 세부 (주석 "비용의 성격별 분류"/"판매비와관리비")
+    expense_by_nature_by_year = hist.get('expense_by_nature', {})
+    sga_detail_by_year = hist.get('sga_detail', {})
+    all_nature_items = sorted({item for yr in hist_years for item in expense_by_nature_by_year.get(yr, {})})
+    all_sga_items = sorted({item for yr in hist_years for item in sga_detail_by_year.get(yr, {})})
+    if all_nature_items or all_sga_items:
+        st.markdown("**🧾 비용 항목별 세부 (주석 기준, 당기)**")
+        if all_nature_items:
+            st.caption("비용의 성격별 분류 (매출원가 + 판매비와관리비 통합)")
+            nature_data = {}
+            for yr in hist_years:
+                items = expense_by_nature_by_year.get(yr, {})
+                row = {item: f"{items.get(item, 0)/div:,.0f}" if items.get(item) else "-" for item in all_nature_items}
+                row[f'합계({u})'] = f"{sum(items.values())/div:,.0f}" if items else "-"
+                nature_data[str(yr)] = row
+            show_table(pd.DataFrame(nature_data), use_container_width=True)
+        if all_sga_items:
+            st.caption("판매비와관리비 항목별 세부")
+            sga_data = {}
+            for yr in hist_years:
+                items = sga_detail_by_year.get(yr, {})
+                row = {item: f"{items.get(item, 0)/div:,.0f}" if items.get(item) else "-" for item in all_sga_items}
+                row[f'합계({u})'] = f"{sum(items.values())/div:,.0f}" if items else "-"
+                sga_data[str(yr)] = row
+            show_table(pd.DataFrame(sga_data), use_container_width=True)
 
     # ── (A) 매출원가 (COGS) ──
     st.markdown("---")
