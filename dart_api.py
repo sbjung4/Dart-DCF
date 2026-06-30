@@ -1630,12 +1630,23 @@ def get_cost_breakdown(corp_code, year, api_key=None, report_type='11011', fs_di
         xml_filenames = [n for n in zf.namelist() if n.lower().endswith('.xml')]
         debug['document_filenames'] = xml_filenames
 
+        text_samples = {}
         for fname in xml_filenames:
             raw = zf.read(fname)
             try:
                 root = _lenient_parse_xml(raw)
             except ET.ParseError:
                 continue
+
+            # 파일 안의 텍스트 샘플 수집 (진단용)
+            file_texts = []
+            for el in root.iter():
+                for t in ((el.text or '').strip(), (el.tail or '').strip()):
+                    if t and len(t) > 2:
+                        file_texts.append(t)
+            # 비용/성격/판매비 관련 텍스트만 필터
+            relevant = [t for t in file_texts if any(k in t for k in ('비용', '성격', '판매비', '당기', '전기'))]
+            text_samples[fname] = relevant[:30]
 
             if not result['expense_by_nature']:
                 table, unit_text = _find_note_table_current_period(root, _COST_NATURE_HEADING_KEYWORDS)
@@ -1661,6 +1672,8 @@ def get_cost_breakdown(corp_code, year, api_key=None, report_type='11011', fs_di
                 break
 
         debug['stage'] = 'ok' if (result['expense_by_nature'] or result['sga_detail']) else 'no_matching_table_found'
+        if debug['stage'] == 'no_matching_table_found':
+            debug['text_samples_per_file'] = text_samples
         return result
     except Exception as e:
         debug['stage'] = 'exception'
