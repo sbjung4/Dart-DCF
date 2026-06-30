@@ -149,7 +149,7 @@ def extract_historical_summary(financial_data: dict, years: list) -> dict:
         # 사업부문별 매출액 (XBRL 영업부문 주석, IFRS 8 OperatingSegmentsAxis)
         'segment_revenue': {}, 'segment_debug': {},
         # 비용 항목별 세부 (주석 "비용의 성격별 분류"/"판매비와관리비")
-        'expense_by_nature': {}, 'sga_detail': {},
+        'expense_by_nature': {}, 'sga_detail': {}, 'cost_breakdown_debug': {},
     }
     for yr in years:
         yr_data = financial_data.get(str(yr), {})
@@ -165,6 +165,7 @@ def extract_historical_summary(financial_data: dict, years: list) -> dict:
         cost_breakdown = yr_data.get('_cost_breakdown') or {}
         summary['expense_by_nature'][yr] = cost_breakdown.get('expense_by_nature') or {}
         summary['sga_detail'][yr] = cost_breakdown.get('sga_detail') or {}
+        summary['cost_breakdown_debug'][yr] = yr_data.get('_cost_breakdown_debug')
 
         rev = is_data.get('revenue', 0)
         cogs = is_data.get('cogs', 0)
@@ -839,6 +840,17 @@ elif page == 'DCF 가정 입력':
     sga_detail_by_year = hist.get('sga_detail', {})
     all_nature_items = sorted({item for yr in hist_years for item in expense_by_nature_by_year.get(yr, {})})
     all_sga_items = sorted({item for yr in hist_years for item in sga_detail_by_year.get(yr, {})})
+
+    cost_dbg = hist.get('cost_breakdown_debug', {})
+    with st.expander("🔍 비용 항목 추출 진단 정보 (항목표가 안 보일 때 펼치세요)", expanded=not (all_nature_items or all_sga_items)):
+        for yr in hist_years:
+            dbg = cost_dbg.get(yr)
+            if dbg:
+                st.write(f"**{yr}년**")
+                st.json(dbg)
+            else:
+                st.write(f"**{yr}년**: 진단 데이터 없음 (조회 전이거나 비용 항목 fetch가 포함 안 된 버전)")
+
     if all_nature_items or all_sga_items:
         st.markdown("**🧾 비용 항목별 세부 (주석 기준, 당기)**")
         if all_nature_items:
