@@ -1522,26 +1522,52 @@ def _find_note_table_current_period(root, heading_keywords, period_marker='당�
     "당기"/"전기"/"전전기" 표가 각각 별도의 TABLE로 따로 나온다. 따라서 제목
     문단이 등장한 뒤 "당기" 문단이 나오고, 그 다음 처음 만나는 표를 채택한다
     (전기/전전기 표는 건너뛴다 -- 비교연도는 그 연도 사업보고서를 따로 조회할
-    때 당기 표에서 가져오는 것이 더 정확하다)."""
+    때 당기 표에서 가져오는 것이 더 정확하다).
+
+    DART XML에서 제목이 여러 요소에 쪼개져 있는 경우("비용의"/<b>"성격별 분류"</b>)를
+    처리하기 위해, 최근 N자 롤링 버퍼에 키워드가 모두 나타나는지 확인한다."""
     pending_unit = None
     after_heading = False
     seen_period_marker = False
     heading_keywords_norm = tuple(_normalize_ws(h) for h in heading_keywords)
+
+    # 최근 텍스트를 누적해 단일 노드에 쪼개진 제목도 검출
+    text_buf = ''
+    BUF_LIMIT = 200  # 제목 키워드 탐색 윈도우 (문자 수)
 
     for el in root.iter():
         local = _local_tag(el.tag).lower()
         if local == 'table':
             if after_heading and seen_period_marker:
                 return el, pending_unit
+            # "당기" 마커를 찾지 못한 상태에서 표를 만나면:
+            # 표 안에 "전기"만 있고 "당기"가 없는 경우 → 이 표는 전기 표일 수 있어 건너뜀.
+            # 표 안에 아무 기수 구분이 없는 경우 → 첫 번째 표를 당기로 간주(폴백).
+            # 판단 방법: 표 바로 앞 최근 버퍼에 "전기" 단독 언급이 있으면 전기표로 스킵,
+            # 아무것도 없으면 폴백으로 채택.
+            if after_heading and not seen_period_marker:
+                if '전기' not in text_buf:
+                    return el, pending_unit  # 폴백: 기수 표지 없는 첫 표 = 당기
+            # 표 경계에서 버퍼 초기화 (다음 표의 제목이 이전 표 뒤의 텍스트와 섞이지 않도록)
+            text_buf = ''
         else:
             for txt in ((el.text or '').strip(), (el.tail or '').strip()):
                 if not txt:
                     continue
                 txt_norm = _normalize_ws(txt)
-                if all(h in txt_norm for h in heading_keywords_norm):
+                text_buf = (text_buf + ' ' + txt_norm)[-BUF_LIMIT:]
+
+                # 제목 키워드 검사: 단일 노드 OR 누적 버퍼에서 모두 발견
+                if all(h in txt_norm for h in heading_keywords_norm) or \
+                        all(h in text_buf for h in heading_keywords_norm):
                     after_heading = True
                     seen_period_marker = False
-                if after_heading and not seen_period_marker and txt_norm.startswith(period_marker):
+                    text_buf = ''  # 제목 찾은 후 버퍼 초기화
+
+                # "당기" 마커는 단독 텍스트(≤30자)에서만 인정
+                # ("당기순이익", "당기법인세" 같은 본문 텍스트의 오탐 방지)
+                if after_heading and not seen_period_marker and period_marker in txt_norm \
+                        and len(txt_norm) <= 30:
                     seen_period_marker = True
                 if '단위' in txt:
                     m = _UNIT_TEXT_RE.search(txt)
