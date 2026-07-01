@@ -1806,6 +1806,7 @@ def get_shares_outstanding(corp_code, year, api_key=None):
         resp = requests.get(url, params=params, timeout=30)
         resp.raise_for_status()
         data = resp.json()
+        print(f"[DEBUG stockTotqySttus] status={data.get('status')} list={data.get('list', [])[:3]}")
         if data.get('status') != '000':
             return None
         items = data.get('list', [])
