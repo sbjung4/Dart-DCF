@@ -284,6 +284,15 @@ with st.sidebar:
     )
     st.session_state.page = page
 
+    # 페이지 전환 시 스크롤 최상단으로 이동
+    if st.session_state.get('_prev_page') != page:
+        st.session_state['_prev_page'] = page
+        import streamlit.components.v1 as _comp
+        _comp.html(
+            "<script>window.parent.document.querySelector('section.main').scrollTo(0,0);</script>",
+            height=0,
+        )
+
     if st.session_state.selected_company:
         st.divider()
         co = st.session_state.selected_company
@@ -540,8 +549,9 @@ if page == '기업 검색':
                         st.info("👉 '재무제표 확인' 메뉴에서 확인하세요.")
                     except Exception as e:
                         st.error(f"재무제표 로드 오류: {str(e)}")
-                        import traceback
-                        st.code(traceback.format_exc())
+                        with st.expander("오류 상세 (디버그용)"):
+                            import traceback
+                            st.code(traceback.format_exc())
 
 # ─── Page 2: 재무제표 확인 ────────────────────────────────────────────────────
 elif page == '재무제표 확인':
@@ -730,7 +740,7 @@ elif page == 'DCF 가정 입력':
         else "🔍 사업부문별 매출 추출 진단 정보 (값이 이상하면 펼쳐서 확인)"
     )
     if seg_dbg:
-        with st.expander(expander_title, expanded=not all_hist_segments):
+        with st.expander(expander_title, expanded=False):
             for yr in hist_years:
                 dbg = seg_dbg.get(yr)
                 if dbg:
@@ -993,23 +1003,24 @@ elif page == 'DCF 가정 입력':
 
                 xbrl_dbg = hist.get('xbrl_debug', {}).get(yr)
                 if xbrl_dbg:
-                    st.caption(f"XBRL 주석 폴백 진단 — 단계: `{xbrl_dbg.get('stage')}`")
-                    if xbrl_dbg.get('rcept_no'):
-                        st.caption(f"접수번호(rcept_no): {xbrl_dbg['rcept_no']}")
-                    if xbrl_dbg.get('da_breakdown'):
-                        b = xbrl_dbg['da_breakdown']
-                        st.caption(
-                            f"D&A 구성: 감가상각비(유형자산) {b.get('ppe', 0):,.0f} + "
-                            f"무형자산상각비 {b.get('intangible', 0):,.0f} + "
-                            f"사용권자산상각비 {b.get('rou', 0):,.0f}"
-                        )
-                    if xbrl_dbg.get('detail'):
-                        st.code(str(xbrl_dbg['detail'])[:1000])
-                    if xbrl_dbg.get('tag_sample'):
-                        st.caption("XBRL 내 감가상각/상각/유형자산 관련 태그명 후보:")
-                        st.code("\n".join(xbrl_dbg['tag_sample']))
-                    elif xbrl_dbg.get('stage') == 'no_matching_tags':
-                        st.caption("XBRL 문서 자체에 depreciation/amortisation/propertyplant 패턴을 포함한 태그가 전혀 없습니다 — 이 회사 필링은 주석을 XBRL로 태깅하지 않았을 가능성이 높습니다.")
+                    with st.expander(f"🔬 {yr}년 D&A XBRL 진단 (펼치기)", expanded=False):
+                        st.caption(f"단계: `{xbrl_dbg.get('stage')}`")
+                        if xbrl_dbg.get('rcept_no'):
+                            st.caption(f"접수번호(rcept_no): {xbrl_dbg['rcept_no']}")
+                        if xbrl_dbg.get('da_breakdown'):
+                            b = xbrl_dbg['da_breakdown']
+                            st.caption(
+                                f"D&A 구성: 감가상각비(유형자산) {b.get('ppe', 0):,.0f} + "
+                                f"무형자산상각비 {b.get('intangible', 0):,.0f} + "
+                                f"사용권자산상각비 {b.get('rou', 0):,.0f}"
+                            )
+                        if xbrl_dbg.get('detail'):
+                            st.code(str(xbrl_dbg['detail'])[:1000])
+                        if xbrl_dbg.get('tag_sample'):
+                            st.caption("XBRL 내 감가상각/상각/유형자산 관련 태그명 후보:")
+                            st.code("\n".join(xbrl_dbg['tag_sample']))
+                        elif xbrl_dbg.get('stage') == 'no_matching_tags':
+                            st.caption("XBRL 문서 자체에 depreciation/amortisation/propertyplant 패턴을 포함한 태그가 전혀 없습니다.")
 
     st.markdown("---")
 
@@ -1648,25 +1659,17 @@ elif page == 'DCF 결과':
         sens_display = sens_df_T.map(lambda x: f"{x:,.0f}" if x is not None and not np.isnan(x) else "N/A")
         show_table(sens_display, use_container_width=True)
 
-        fig_heat = px.imshow(
-            sens_df.map(lambda x: x if not np.isnan(x) else 0).values,
-            x=[f"{t:.1f}%" for t in tgr_range],
-            y=[f"{w:.1f}%" for w in wacc_range],
-            color_continuous_scale='RdYlGn',
-            title=f'{label} 민감도 히트맵 (행: WACC, 열: TGR)',
-            labels={'x': 'TGR', 'y': 'WACC'},
-            text_auto='.0f'
-        )
-        fig_heat.update_layout(height=400)
-        st.plotly_chart(fig_heat, use_container_width=True)
-
         st.divider()
 
         # Excel 내보내기
         st.subheader("📥 결과 내보내기")
 
-        def create_excel_export():
-            return build_excel_workbook(
+        company_name = st.session_state.selected_company['corp_name'] if st.session_state.selected_company else 'company'
+
+        # 가정값이 바뀌지 않도록 Excel은 버튼 클릭 시에만 생성 후 세션에 캐시
+        _excel_key = f"excel_cache_{company_name}_{base_year}"
+        if st.button("📊 Excel 생성"):
+            st.session_state[_excel_key] = build_excel_workbook(
                 company_name=company_name,
                 hist=hist, asmp=asmp,
                 fcff_df=fcff_df, pv_fcff_df=pv_fcff_df,
@@ -1675,16 +1678,16 @@ elif page == 'DCF 결과':
                 price_per_share=price_per_share, base_year=base_year,
                 financial_data=st.session_state.financial_data,
             )
-
-        company_name = st.session_state.selected_company['corp_name'] if st.session_state.selected_company else 'company'
-        st.download_button(
-            label="📊 Excel 다운로드",
-            data=create_excel_export(),
-            file_name=f"{company_name}_DCF_{base_year}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+        if _excel_key in st.session_state:
+            st.download_button(
+                label="📥 Excel 다운로드",
+                data=st.session_state[_excel_key],
+                file_name=f"{company_name}_DCF_{base_year}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
 
     except Exception as e:
         st.error(f"DCF 계산 오류: {str(e)}")
-        import traceback
-        st.code(traceback.format_exc())
+        with st.expander("오류 상세 (디버그용)"):
+            import traceback
+            st.code(traceback.format_exc())
