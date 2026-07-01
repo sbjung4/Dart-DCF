@@ -1792,6 +1792,10 @@ def get_shares_outstanding(corp_code, year, api_key=None):
 
     DART stockTotqySttus API → 사업보고서 연도 기준 발행주식총수(보통주)를 조회.
     API가 실패하면 None을 반환한다.
+
+    DART API 응답 필드:
+      se: 구분 ("보통주" / "우선주" 등)
+      isu_stock_totqy: 발행주식총수 (쉼표 포함 문자열)
     """
     key = get_dart_api_key(api_key)
     if not key:
@@ -1804,15 +1808,23 @@ def get_shares_outstanding(corp_code, year, api_key=None):
         data = resp.json()
         if data.get('status') != '000':
             return None
-        # 보통주 발행주식총수 찾기
-        for item in data.get('list', []):
-            stock_knd = (item.get('stock_knd') or '').strip()
-            if '보통주' in stock_knd or stock_knd == '':
-                istc_totqy = (item.get('istc_totqy') or '').replace(',', '').strip()
+        items = data.get('list', [])
+        # 보통주 행 우선, 없으면 첫 번째 행
+        for item in items:
+            se = (item.get('se') or '').strip()
+            if '보통주' in se:
+                qty_str = (item.get('isu_stock_totqy') or '').replace(',', '').replace(' ', '')
                 try:
-                    return int(istc_totqy)
+                    return int(qty_str)
                 except ValueError:
-                    continue
+                    pass
+        # 보통주 행이 없으면 첫 번째 행
+        if items:
+            qty_str = (items[0].get('isu_stock_totqy') or '').replace(',', '').replace(' ', '')
+            try:
+                return int(qty_str)
+            except ValueError:
+                pass
         return None
     except Exception:
         return None
