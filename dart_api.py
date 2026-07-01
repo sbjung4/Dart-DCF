@@ -875,6 +875,7 @@ def _parse_fs_from_document_xml(root, fs_div='OFS'):
 
     # 모든 테이블 수집
     all_tables = [el for el in root.iter() if _local_tag(el.tag).lower() == 'table']
+    print(f"[AUDIT_PARSE] total tables found: {len(all_tables)}")
 
     def _table_text(table):
         rows = _table_rows(table)
@@ -994,6 +995,12 @@ def _get_fs_from_audit_report(corp_code, year, api_key, fs_div='OFS'):
             root = _lenient_parse_xml(zf.read(fname))
         except Exception:
             continue
+        # 태그 구조 덤프
+        from collections import Counter as _Counter
+        _tags = _Counter()
+        for _el in root.iter():
+            _tags[_local_tag(_el.tag).lower()] += 1
+        print(f"[AUDIT] {fname} tag counts: {_tags.most_common(20)}")
         # 텍스트 샘플 덤프 (재무/매출 관련 키워드 포함 노드만)
         samples = []
         for el in root.iter():
