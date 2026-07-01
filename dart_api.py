@@ -1577,19 +1577,66 @@ def _find_note_table_current_period(root, heading_keywords, period_marker='당�
 
 
 def _parse_note_amount_table(table, exclude_keywords):
-    """주석 표(좌측 칸이 ROWSPAN으로 그룹명과 병합된, 들여쓰기 있는 표)에서
-    {항목명: 금액} 을 추출한다. 각 행의 마지막 칸을 금액으로, 그 앞에서
-    가장 가까운 비어있지 않은 칸을 항목명으로 본다(중간 그룹명 칸들은
-    ROWSPAN으로 병합돼 빠져 있어 보통 칸이 2개뿐이다). exclude_keywords에
-    해당하는 항목명(합계/소계처럼 이미 다른 행들의 합산인 행)은 제외한다."""
+    """주석 표에서 {항목명: 금액}을 추출한다.
+
+    두 가지 구조를 처리한다:
+    A) 단일 금액 컬럼: [항목명, 금액] — 마지막 칸 = 금액
+    B) 다중 기간 컬럼: [항목명, 당기, 전기, ...] — 헤더에서 "당기" 컬럼 위치 찾아 사용
+
+    헤더 행을 먼저 스캔해 "당기" 키워드 컬럼이 있으면 B형으로,
+    없으면 A형(마지막 칸)으로 처리한다.
+    """
     rows = _table_rows(table)
+    if not rows:
+        return {}
+
+    # 헤더 행 탐색: 첫 3행 중 "당기" 텍스트를 가진 칸의 컬럼 인덱스 찾기
+    amount_col = None  # None → A형(마지막 칸), int → B형(특정 컬럼)
+    data_start = 0
+    for hi, tr in enumerate(rows[:3]):
+        cells = _row_cells(tr)
+        texts = [_cell_text(c) for c in cells]
+        for ci, t in enumerate(texts):
+            t_n = _normalize_ws(t)
+            # "당기" 단독이거나 "당기" + 연도/기수 조합 (예: "당기(제55기)")
+            if '당기' in t_n and '전기' not in t_n:
+                amount_col = ci
+                data_start = hi + 1
+                break
+        if amount_col is not None:
+            break
+
     items = {}
-    for tr in rows:
+    for tr in rows[data_start:]:
         cells = _row_cells(tr)
         texts = [_cell_text(c) for c in cells]
         if len(texts) < 2:
             continue
-        amount_text = texts[-1].replace(',', '').replace(' ', '')
+
+        if amount_col is not None and amount_col < len(texts):
+            # B형: 당기 컬럼 위치 사용
+            raw_amount = texts[amount_col]
+            # 항목명: amount_col보다 앞에서 가장 가까운 비어있지 않은 칸
+            label = None
+            for t in reversed(texts[:amount_col]):
+                if t.strip():
+                    label = t.strip()
+                    break
+            if not label and texts[0].strip():
+                label = texts[0].strip()
+        else:
+            # A형: 마지막 칸 = 금액, 그 앞에서 가장 가까운 비어있지 않은 칸 = 항목명
+            raw_amount = texts[-1]
+            label = None
+            for t in reversed(texts[:-1]):
+                if t.strip():
+                    label = t.strip()
+                    break
+
+        if not label:
+            continue
+
+        amount_text = raw_amount.replace(',', '').replace(' ', '')
         is_negative = amount_text.startswith('△') or amount_text.startswith('-')
         amount_text = amount_text.lstrip('△-')
         if not amount_text:
@@ -1601,13 +1648,6 @@ def _parse_note_amount_table(table, exclude_keywords):
         if is_negative:
             val = -val
 
-        label = None
-        for t in reversed(texts[:-1]):
-            if t.strip():
-                label = t.strip()
-                break
-        if not label:
-            continue
         if any(k in _normalize_ws(label) for k in exclude_keywords):
             continue
         items[label] = items.get(label, 0.0) + val

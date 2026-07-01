@@ -1432,13 +1432,16 @@ elif page == 'DCF 가정 입력':
 
     col1, col2 = st.columns(2)
     with col1:
-        shares_label = "발행주식수 (주)"
+        st.markdown("**발행주식수 (주)**")
         if auto_shares > 0:
-            shares_label += f"  ✅ 자동 조회: {auto_shares:,}주"
-        asmp['shares_outstanding'] = st.number_input(shares_label,
+            st.caption(f"✅ DART 자동 조회: {auto_shares:,}주")
+        else:
+            raw_shares_data = {yr: hist['shares_outstanding'].get(yr) for yr in hist_years}
+            st.caption(f"⚠️ 자동 조회 실패 — hist 값: {raw_shares_data}")
+        asmp['shares_outstanding'] = st.number_input("발행주식수",
                                                        value=float(asmp.get('shares_outstanding', 0)),
                                                        step=1000.0,
-                                                       help="DART stockTotqySttus API 자동 조회. 수정 가능.")
+                                                       label_visibility='collapsed')
     with col2:
         net_debt_auto = hist['net_debt'].get(base_year, 0)
         st.metric("자동 산출 순차입금 (IBD-현금성자산)", f"{fmt_억(net_debt_auto)}억원",
