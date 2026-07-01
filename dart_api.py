@@ -956,6 +956,7 @@ def _get_fs_from_audit_report(corp_code, year, api_key, fs_div='OFS'):
     실패 시 None을 반환한다."""
     key = get_dart_api_key(api_key)
     rcept_no = _find_audit_report_rcept_no(corp_code, year, key)
+    print(f"[AUDIT] corp={corp_code} year={year} rcept_no={rcept_no}")
     if not rcept_no:
         return None
 
@@ -965,11 +966,13 @@ def _get_fs_from_audit_report(corp_code, year, api_key, fs_div='OFS'):
                             timeout=60)
         resp.raise_for_status()
         zf = zipfile.ZipFile(io.BytesIO(resp.content))
-    except Exception:
+    except Exception as e:
+        print(f"[AUDIT] ZIP download failed: {e}")
         return None
 
     # 연결/별도 구분에 맞는 파일 우선 시도 (파일명 힌트 없으면 모두 시도)
     xml_files = [n for n in zf.namelist() if n.lower().endswith('.xml')]
+    print(f"[AUDIT] xml_files={xml_files}")
     best = None
     for fname in xml_files:
         try:
@@ -977,8 +980,10 @@ def _get_fs_from_audit_report(corp_code, year, api_key, fs_div='OFS'):
         except Exception:
             continue
         parsed = _parse_fs_from_document_xml(root, fs_div)
+        rev = parsed['income_statement'].get('revenue')
+        print(f"[AUDIT] {fname}: revenue={rev}  is_keys={list(parsed['income_statement'].keys())}")
         # IS에 revenue가 있으면 채택
-        if parsed['income_statement'].get('revenue'):
+        if rev:
             if best is None:
                 best = parsed
             # CFS 요청인데 연결 재무제표 파일인 경우 우선

@@ -434,11 +434,10 @@ if page == '기업 검색':
                                 no_data_years.append(yr)
 
                         if len(no_data_years) == len(years):
+                            last_msg = financial_data.get(str(years[-1]), {}).get('_message', '')
                             st.error(
-                                f"❌ {selected_co['corp_name']}의 재무제표를 찾을 수 없습니다. "
-                                "감사보고서만 제출하는 비상장 외부감사대상 법인은 DART Open API의 "
-                                "표준 재무제표(전체계정) 조회 대상이 아니어서 이 화면에서는 불러올 수 없습니다. "
-                                "감사보고서 원문은 DART 웹사이트(dart.fss.or.kr)에서 직접 확인해주세요."
+                                f"❌ {selected_co['corp_name']}의 재무제표를 찾을 수 없습니다.\n\n"
+                                + (last_msg or "DART API에서 데이터를 가져오지 못했습니다.")
                             )
                             st.session_state.financial_data = financial_data
                             st.stop()
