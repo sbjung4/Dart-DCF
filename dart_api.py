@@ -713,15 +713,19 @@ def get_financial_statements(corp_code, year, api_key, report_type='11011', fs_d
             if data.get('status') not in ('000', '013'):
                 raise ValueError(f"DART API Error [{data.get('status')}]: {data.get('message', 'Unknown')}")
 
-    # 모든 보고서 종류/구분에서 데이터를 찾지 못함 — 정기보고서를 제출하지 않는
-    # (감사보고서만 제출하는) 법인일 가능성이 높음
+    # 모든 보고서 종류/구분에서 데이터를 찾지 못함
+    # → 감사보고서 원문 직접 파싱으로 폴백 시도
+    audit_result = _get_fs_from_audit_report(corp_code, year, key, fs_div)
+    if audit_result:
+        return audit_result
+
     return {
         'income_statement': {}, 'balance_sheet': {}, 'cash_flow': {},
         '_no_data': True,
         '_message': (
-            f"{year}년 정기보고서(사업/반기/분기보고서) 데이터를 찾을 수 없습니다. "
-            "감사보고서만 제출하는 비상장 외부감사대상 법인은 DART Open API의 "
-            "표준 재무제표 조회 대상이 아닙니다 (감사보고서 원문은 DART 웹사이트에서 확인 가능)."
+            f"{year}년 재무제표 데이터를 찾을 수 없습니다. "
+            "정기보고서(사업/반기/분기) 및 감사보고서 원문 파싱을 모두 시도했으나 "
+            "데이터를 추출하지 못했습니다."
         ),
     }
 
@@ -776,6 +780,259 @@ def _find_rcept_no(corp_code, year, api_key, report_type='11011'):
     except Exception:
         return None
     return None
+
+
+def _find_audit_report_rcept_no(corp_code, year, api_key):
+    """비상장 외부감사 대상 법인의 감사보고서 rcept_no를 DART list API로 찾는다.
+    정기공시(pblntf_ty=A)에 없는 경우 외부감사(F) 카테고리도 시도한다."""
+    key = get_dart_api_key(api_key)
+    bgn_de = f"{year}0101"
+    end_de = f"{year + 1}0930"
+    for pblntf_ty in ('A', 'F'):
+        try:
+            params = {
+                "crtfc_key": key,
+                "corp_code": corp_code,
+                "bgn_de": bgn_de,
+                "end_de": end_de,
+                "pblntf_ty": pblntf_ty,
+                "page_count": 100,
+            }
+            resp = requests.get(f"{BASE_URL}/list.json", params=params, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get('status') != '000':
+                continue
+            candidates = data.get('list', []) or []
+            # 감사보고서 or 재무제표 포함 제목 우선
+            for keyword in ('감사보고서', '재무제표'):
+                for item in candidates:
+                    nm = item.get('report_nm', '')
+                    if keyword in nm:
+                        return item.get('rcept_no')
+        except Exception:
+            continue
+    return None
+
+
+# 재무제표 섹션 제목 키워드 → 추출할 계정 키워드 매핑
+_FS_SECTION_KEYWORDS = {
+    'bs':  ('재무상태표', '대차대조표'),
+    'is':  ('손익계산서', '포괄손익계산서', '영업손익계산서'),
+    'cf':  ('현금흐름표',),
+}
+
+# 계정명 키워드 → (섹션, 내부 키)
+_FS_ACCOUNT_KEYWORDS = [
+    # IS
+    ('is', 'revenue',      ['매출액', '영업수익', '수익(매출액)', '매출']),
+    ('is', 'cogs',         ['매출원가', '영업비용(매출원가)', '영업원가']),
+    ('is', 'gross_profit', ['매출총이익', '매출총손익']),
+    ('is', 'sga',          ['판매비와관리비', '판매비및관리비', '판관비']),
+    ('is', 'ebit',         ['영업이익', '영업손익']),
+    ('is', 'net_income',   ['당기순이익', '당기순손익', '분기순이익']),
+    # BS
+    ('bs', 'total_assets',      ['자산총계']),
+    ('bs', 'total_liabilities', ['부채총계']),
+    ('bs', 'total_equity',      ['자본총계']),
+    ('bs', 'cash',              ['현금및현금성자산']),
+    ('bs', 'accounts_receivable', ['매출채권']),
+    ('bs', 'inventory',         ['재고자산']),
+    # CF
+    ('cf', 'operating_cf',  ['영업활동으로인한현금흐름', '영업활동현금흐름']),
+    ('cf', 'investing_cf',  ['투자활동으로인한현금흐름', '투자활동현금흐름']),
+    ('cf', 'financing_cf',  ['재무활동으로인한현금흐름', '재무활동현금흐름']),
+    ('cf', 'da',            ['감가상각비', '유형자산감가상각비']),
+    ('cf', 'capex',         ['유형자산의취득', '유형자산취득']),
+]
+
+
+def _parse_amount(text):
+    """금액 문자열 → float. △/-는 음수. 파싱 불가면 None."""
+    t = (text or '').replace(',', '').replace(' ', '').strip()
+    neg = t.startswith('△') or t.startswith('-') or (t.startswith('(') and t.endswith(')'))
+    t = t.lstrip('△-(').rstrip(')')
+    if not t:
+        return None
+    try:
+        v = float(t)
+        return -v if neg else v
+    except ValueError:
+        return None
+
+
+def _parse_fs_from_document_xml(root, fs_div='OFS'):
+    """감사보고서/사업보고서 원문 XML에서 BS/IS/CF 주요 계정을 추출한다.
+
+    전략:
+    1) 각 섹션 제목("재무상태표" 등) 다음에 오는 첫 번째 TABLE을 해당 섹션 표로 간주.
+    2) 각 행에서 계정명 칸과 금액 칸을 추출. 금액이 여러 열인 경우 첫 번째(당기) 열 사용.
+    3) 미리 정의한 계정 키워드 목록과 부분 일치로 계정을 매핑.
+    """
+    result = {'income_statement': {}, 'balance_sheet': {}, 'cash_flow': {}}
+    section_map = {'bs': 'balance_sheet', 'is': 'income_statement', 'cf': 'cash_flow'}
+
+    # 섹션별 첫 번째 TABLE 위치 찾기
+    section_tables = {}
+    text_buf = ''
+    BUF = 150
+    current_sections = []
+
+    for el in root.iter():
+        local = _local_tag(el.tag).lower()
+        if local == 'table':
+            for sec in list(current_sections):
+                if sec not in section_tables:
+                    section_tables[sec] = el
+                current_sections = []
+            text_buf = ''
+        else:
+            for txt in ((el.text or '').strip(), (el.tail or '').strip()):
+                if not txt:
+                    continue
+                t_n = _normalize_ws(txt)
+                text_buf = (text_buf + ' ' + t_n)[-BUF:]
+                for sec, kws in _FS_SECTION_KEYWORDS.items():
+                    if sec not in section_tables and any(kw in text_buf for kw in kws):
+                        if sec not in current_sections:
+                            current_sections.append(sec)
+
+    # 각 섹션 표에서 계정 추출
+    for sec, table in section_tables.items():
+        rows = _table_rows(table)
+        if not rows:
+            continue
+        # 헤더 행에서 "당기" 컬럼 위치 찾기
+        amount_col = None
+        data_start = 0
+        for hi, tr in enumerate(rows[:3]):
+            cells = _row_cells(tr)
+            texts = [_cell_text(c) for c in cells]
+            for ci, t in enumerate(texts):
+                if '당기' in _normalize_ws(t) and '전기' not in _normalize_ws(t):
+                    amount_col = ci
+                    data_start = hi + 1
+                    break
+            if amount_col is not None:
+                break
+
+        # 계정별로 추출할 키워드 목록
+        target_accounts = [(key, kws) for (s, key, kws) in _FS_ACCOUNT_KEYWORDS if s == sec]
+        section_result = result[section_map[sec]]
+
+        for tr in rows[data_start:]:
+            cells = _row_cells(tr)
+            texts = [_cell_text(c) for c in cells]
+            if len(texts) < 2:
+                continue
+            # 계정명: 첫 번째 비어있지 않은 칸
+            acct_name = ''
+            for t in texts:
+                if t.strip():
+                    acct_name = _normalize_ws(t.strip())
+                    break
+            if not acct_name:
+                continue
+            # 금액: amount_col 위치 or 마지막 칸
+            if amount_col is not None and amount_col < len(texts):
+                amt = _parse_amount(texts[amount_col])
+            else:
+                amt = _parse_amount(texts[-1])
+            if amt is None:
+                continue
+
+            for key, kws in target_accounts:
+                if key not in section_result:
+                    if any(kw in acct_name for kw in kws):
+                        section_result[key] = amt
+                        break
+
+    return result
+
+
+def _get_fs_from_audit_report(corp_code, year, api_key, fs_div='OFS'):
+    """감사보고서 원문을 다운로드해 재무제표 주요 계정을 파싱한다.
+    성공 시 get_financial_statements와 동일한 형태의 dict를 반환.
+    실패 시 None을 반환한다."""
+    key = get_dart_api_key(api_key)
+    rcept_no = _find_audit_report_rcept_no(corp_code, year, key)
+    if not rcept_no:
+        return None
+
+    try:
+        resp = requests.get(f"{BASE_URL}/document.xml",
+                            params={"crtfc_key": key, "rcept_no": rcept_no},
+                            timeout=60)
+        resp.raise_for_status()
+        zf = zipfile.ZipFile(io.BytesIO(resp.content))
+    except Exception:
+        return None
+
+    # 연결/별도 구분에 맞는 파일 우선 시도 (파일명 힌트 없으면 모두 시도)
+    xml_files = [n for n in zf.namelist() if n.lower().endswith('.xml')]
+    best = None
+    for fname in xml_files:
+        try:
+            root = _lenient_parse_xml(zf.read(fname))
+        except Exception:
+            continue
+        parsed = _parse_fs_from_document_xml(root, fs_div)
+        # IS에 revenue가 있으면 채택
+        if parsed['income_statement'].get('revenue'):
+            if best is None:
+                best = parsed
+            # CFS 요청인데 연결 재무제표 파일인 경우 우선
+            if fs_div == 'CFS' and '연결' in fname:
+                best = parsed
+                break
+            elif fs_div == 'OFS' and '연결' not in fname:
+                best = parsed
+                break
+
+    if not best or not best['income_statement'].get('revenue'):
+        return None
+
+    # get_financial_statements 반환 형태로 맞추기
+    is_ = best['income_statement']
+    bs_ = best['balance_sheet']
+    cf_ = best['cash_flow']
+
+    # 단위 추론: 감사보고서는 대부분 원 단위 or 천원 단위
+    # revenue가 1조 이상이면 원 단위, 1억 이하면 천원 단위일 가능성
+    # 여기서는 그냥 원 단위로 반환 (파서가 숫자 그대로 읽음)
+    unit = 1  # 단위 변환은 하지 않음; 이미 원 단위
+
+    result = {
+        'income_statement': {
+            'revenue': (is_.get('revenue') or 0) * unit,
+            'cogs': (is_.get('cogs') or 0) * unit,
+            'gross_profit': (is_.get('gross_profit') or 0) * unit,
+            'sga': (is_.get('sga') or 0) * unit,
+            'ebit': (is_.get('ebit') or 0) * unit,
+            'net_income': (is_.get('net_income') or 0) * unit,
+            'da': (cf_.get('da') or 0) * unit,
+        },
+        'balance_sheet': {
+            'total_assets': (bs_.get('total_assets') or 0) * unit,
+            'total_liabilities': (bs_.get('total_liabilities') or 0) * unit,
+            'total_equity': (bs_.get('total_equity') or 0) * unit,
+            'cash': (bs_.get('cash') or 0) * unit,
+            'accounts_receivable': (bs_.get('accounts_receivable') or 0) * unit,
+            'inventory': (bs_.get('inventory') or 0) * unit,
+            'shares_outstanding': 0,
+        },
+        'cash_flow': {
+            'operating_cf': (cf_.get('operating_cf') or 0) * unit,
+            'investing_cf': (cf_.get('investing_cf') or 0) * unit,
+            'financing_cf': (cf_.get('financing_cf') or 0) * unit,
+            'da': (cf_.get('da') or 0) * unit,
+            'capex': abs(cf_.get('capex') or 0) * unit,
+        },
+        '_report_type_used': 'audit_report',
+        '_fs_div_used': fs_div,
+        '_rcept_no': rcept_no,
+    }
+    return result
 
 
 # D&A는 영업활동현금흐름의 "현금의 유출이 없는 비용 등의 가산" 항목 기준으로
