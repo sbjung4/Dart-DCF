@@ -1846,26 +1846,42 @@ def get_shares_outstanding(corp_code, year, api_key=None):
         resp = requests.get(url, params=params, timeout=30)
         resp.raise_for_status()
         data = resp.json()
-        print(f"[DEBUG stockTotqySttus] status={data.get('status')} list={data.get('list', [])[:3]}")
-        if data.get('status') != '000':
-            return None
-        items = data.get('list', [])
-        # 보통주 행 우선, 없으면 첫 번째 행
-        for item in items:
-            se = (item.get('se') or '').strip()
-            if '보통주' in se:
-                qty_str = (item.get('isu_stock_totqy') or '').replace(',', '').replace(' ', '')
-                try:
-                    return int(qty_str)
-                except ValueError:
-                    pass
-        # 보통주 행이 없으면 첫 번째 행
-        if items:
-            qty_str = (items[0].get('isu_stock_totqy') or '').replace(',', '').replace(' ', '')
-            try:
-                return int(qty_str)
-            except ValueError:
-                pass
-        return None
+        if data.get('status') == '000':
+            items = data.get('list', [])
+            # 보통주 행 우선
+            for item in items:
+                se = (item.get('se') or '').strip()
+                if '보통주' in se or not se:
+                    for field in ('isu_stock_totqy', 'istc_totqy', 'distb_stock_co'):
+                        qty_str = (item.get(field) or '').replace(',', '').replace(' ', '')
+                        try:
+                            v = int(qty_str)
+                            if v > 0:
+                                return v
+                        except ValueError:
+                            pass
     except Exception:
-        return None
+        pass
+
+    # 폴백: irdsSttus API
+    try:
+        url2 = f"{BASE_URL}/irdsSttus.json"
+        params2 = {"crtfc_key": key, "corp_code": corp_code, "bsns_year": str(year), "reprt_code": "11011"}
+        resp2 = requests.get(url2, params=params2, timeout=30)
+        resp2.raise_for_status()
+        data2 = resp2.json()
+        if data2.get('status') == '000':
+            for item in data2.get('list', []):
+                se = (item.get('se') or '').strip()
+                if '보통주' in se or not se:
+                    for field in ('isu_stock_totqy', 'istc_totqy', 'distb_stock_co'):
+                        qty_str = (item.get(field) or '').replace(',', '').replace(' ', '')
+                        try:
+                            v = int(qty_str)
+                            if v > 0:
+                                return v
+                        except ValueError:
+                            pass
+    except Exception:
+        pass
+    return None
