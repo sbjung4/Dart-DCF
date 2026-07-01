@@ -506,16 +506,16 @@ def _extract_financials_from_items(items):
     #      다른 계정이 동시에 존재할 수 있으므로 _sum_by_keyword로 전부 더함)
     ibd = _sum_by_keyword(bs_items, 'BS', KOREAN_NAME_KEYWORDS['ibd'], IBD_EXCLUDE_KEYWORDS)
 
-    # Total debt: 표준 XBRL 계정(account_id)만으로 찾으면, 많은 회사가
-    # 비표준 dart_ 태그를 써서 0이 되는 경우가 많음(삼성전자 등) — account_id
-    # 매칭이 실패하면 위에서 이미 키워드로 전부 합산한 ibd를 그대로 사용한다.
+    # Total debt: XBRL Borrowings 태그는 사채(회사채)를 누락하는 경우가 많음.
+    # ibd(단기차입금+유동성장기부채+장기차입금+사채 등 키워드 합산)와 비교해
+    # 더 큰 값을 사용한다.
     total_debt = _lookup_account(bs_map, ACCOUNT_MAP['total_borrowings'])
     if total_debt == 0:
         short_term = _lookup_account(bs_map, ACCOUNT_MAP['short_term_borrowings'])
         long_term = _lookup_account(bs_map, ACCOUNT_MAP['long_term_borrowings'])
         total_debt = short_term + long_term
-    if total_debt == 0:
-        total_debt = ibd
+    # ibd가 더 크면 ibd 사용 (사채 등 XBRL 태그 누락 항목 보완)
+    total_debt = max(total_debt, ibd)
     # 현금성자산: 현금및현금성자산 + 단기금융상품(단기예금 등)
     cash_equivalents = _sum_by_keyword(bs_items, 'BS', KOREAN_NAME_KEYWORDS['cash_equivalents'], CASH_EQUIV_EXCLUDE_KEYWORDS)
     if cash_equivalents == 0:

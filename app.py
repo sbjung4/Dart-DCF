@@ -106,21 +106,22 @@ def show_table(df, **kwargs):
 
 def calc_korea_corp_tax_rate(taxable_income_억: float) -> float:
     """
-    2026년 이후 한국 법인세 누진세율 (국세청 기준, 영리법인).
-    구간별 누적 계산:
-      ≤2억: 10%, 2~200억: 20%, 200~3000억: 22%, >3000억: 25%
+    한국 법인세 누진세율 + 지방소득세(법인세액의 10%) 포함 유효세율.
+    2023년 이후 세율 구간 (억원 기준):
+      ≤200억: 10%, 200~20,000억: 20%, 20,000~300,000억: 22%, >300,000억: 25%
+    최종 유효세율 = 법인세 실효세율 × 1.1 (지방소득세 10% 가산)
     """
     if taxable_income_억 <= 0:
-        return 0.25
-    if taxable_income_억 <= 2:
+        return 0.25 * 1.1
+    if taxable_income_억 <= 200:
         tax = taxable_income_억 * 0.10
-    elif taxable_income_억 <= 200:
-        tax = 2 * 0.10 + (taxable_income_억 - 2) * 0.20
-    elif taxable_income_억 <= 3000:
-        tax = 2 * 0.10 + 198 * 0.20 + (taxable_income_억 - 200) * 0.22
+    elif taxable_income_억 <= 20000:
+        tax = 200 * 0.10 + (taxable_income_억 - 200) * 0.20
+    elif taxable_income_억 <= 300000:
+        tax = 200 * 0.10 + 19800 * 0.20 + (taxable_income_억 - 20000) * 0.22
     else:
-        tax = 2 * 0.10 + 198 * 0.20 + 2800 * 0.22 + (taxable_income_억 - 3000) * 0.25
-    return tax / taxable_income_억
+        tax = 200 * 0.10 + 19800 * 0.20 + 280000 * 0.22 + (taxable_income_억 - 300000) * 0.25
+    return (tax / taxable_income_억) * 1.1
 
 def extract_historical_summary(financial_data: dict, years: list) -> dict:
     """
@@ -1302,26 +1303,26 @@ elif page == 'DCF 가정 입력':
 
     # ── 6. 세율 ──────────────────────────────────────────────────────────────
     st.subheader("6. 세율")
-    tax_method = st.radio("세율 방법", ['누진세율 자동계산 (2026 한국)', '직접 입력'], horizontal=True,
+    tax_method = st.radio("세율 방법", ['누진세율 자동계산 (지방소득세 포함)', '직접 입력'], horizontal=True,
                           index=0 if asmp.get('tax_method','progressive')=='progressive' else 1)
-    asmp['tax_method'] = 'progressive' if tax_method == '누진세율 자동계산 (2026 한국)' else 'direct'
+    asmp['tax_method'] = 'progressive' if tax_method == '누진세율 자동계산 (지방소득세 포함)' else 'direct'
 
     if asmp['tax_method'] == 'progressive':
         st.markdown("""
-| 과세표준 | 세율 | 누진공제 |
+| 과세표준 | 법인세율 | 지방소득세 포함 |
 |---|---|---|
-| 2억원 이하 | 10% | - |
-| 2억 ~ 200억 | 20% | 2,000만원 |
-| 200억 ~ 3,000억 | 22% | 42,000만원 |
-| 3,000억 초과 | 25% | 942,000만원 |
+| 200억 이하 | 10% | 11% |
+| 200억 ~ 20,000억 | 20% | 22% |
+| 20,000억 ~ 300,000억 | 22% | 24.2% |
+| 300,000억 초과 | 25% | 27.5% |
 
-*2026년 이후 적용 세율 (국세청)*
+*2023년 이후 세율 기준 · 지방소득세(법인세액×10%) 포함*
 """)
         ebit_억 = hist['ebit'].get(base_year, 0) / 1e8
         taxable_income = st.number_input("과세표준 (억원, 기준연도 영업이익 기준)", value=round(ebit_억, 1), step=1.0)
         auto_rate = calc_korea_corp_tax_rate(taxable_income) * 100
         asmp['tax_rate'] = round(auto_rate, 2)
-        st.success(f"유효 법인세율 = **{auto_rate:.2f}%** (과세표준 {taxable_income:.1f}억원 기준)")
+        st.success(f"유효 법인세율 = **{auto_rate:.2f}%** (지방소득세 포함, 과세표준 {taxable_income:.1f}억원)")
     else:
         asmp['tax_rate'] = st.number_input("유효 법인세율 (%)", value=float(asmp.get('tax_rate', 22.0)),
                                             min_value=0.0, max_value=50.0, step=0.5)
