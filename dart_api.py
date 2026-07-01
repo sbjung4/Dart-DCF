@@ -979,6 +979,17 @@ def _get_fs_from_audit_report(corp_code, year, api_key, fs_div='OFS'):
             root = _lenient_parse_xml(zf.read(fname))
         except Exception:
             continue
+        # 텍스트 샘플 덤프 (재무/매출 관련 키워드 포함 노드만)
+        samples = []
+        for el in root.iter():
+            for t in ((el.text or '').strip(), (el.tail or '').strip()):
+                if t and any(k in t for k in ('재무', '매출', '영업', '당기', '자산', '부채', '자본')):
+                    samples.append(t[:80])
+                    if len(samples) >= 15:
+                        break
+            if len(samples) >= 15:
+                break
+        print(f"[AUDIT] {fname} text samples: {samples}")
         parsed = _parse_fs_from_document_xml(root, fs_div)
         rev = parsed['income_statement'].get('revenue')
         print(f"[AUDIT] {fname}: revenue={rev}  is_keys={list(parsed['income_statement'].keys())}")
