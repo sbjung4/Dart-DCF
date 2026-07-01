@@ -145,7 +145,7 @@ def extract_historical_summary(financial_data: dict, years: list) -> dict:
         # 차입금/이자/배당
         'interest_expense': {}, 'dividends_paid': {}, 'implied_interest_rate': {},
         # 순차입금 (IBD - 현금성자산)
-        'ibd': {}, 'cash_equivalents': {}, 'net_debt': {},
+        'ibd': {}, 'ibd_detail': {}, 'cash_equivalents': {}, 'cash_eq_detail': {}, 'net_debt': {},
         # D&A를 XBRL 주석(유형자산 노트)에서 찾아낸 연도 표시용
         'da_source': {}, 'xbrl_debug': {},
         # 사업부문별 매출액 (XBRL 영업부문 주석, IFRS 8 OperatingSegmentsAxis)
@@ -232,7 +232,9 @@ def extract_historical_summary(financial_data: dict, years: list) -> dict:
         ibd_yr = bs_data.get('ibd', 0)
         cash_eq_yr = bs_data.get('cash_equivalents', 0)
         summary['ibd'][yr] = ibd_yr
+        summary['ibd_detail'][yr] = bs_data.get('ibd_detail', [])
         summary['cash_equivalents'][yr] = cash_eq_yr
+        summary['cash_eq_detail'][yr] = bs_data.get('cash_eq_detail', [])
         summary['net_debt'][yr] = bs_data.get('net_debt', ibd_yr - cash_eq_yr)
 
     return summary
@@ -1427,9 +1429,24 @@ elif page == 'DCF 가정 입력':
                                                        label_visibility='collapsed')
     with col2:
         net_debt_auto = hist['net_debt'].get(base_year, 0)
+        ibd_auto = hist['ibd'].get(base_year, 0)
+        cash_eq_auto = hist['cash_equivalents'].get(base_year, 0)
         st.metric("자동 산출 순차입금 (IBD-현금성자산)", f"{fmt_억(net_debt_auto)}억원",
-                  help=f"기준연도({base_year}) IBD(단기차입금/유동성장기부채/장기차입금/리스부채/CB·EB·BW/사채 등) "
-                       "- 현금성자산(현금및현금성자산+단기금융상품). EV - 순차입금 = 자기자본가치")
+                  help=f"기준연도({base_year}) IBD - 현금성자산. EV - 순차입금 = 자기자본가치")
+        # 순차입금 구성 상세 표
+        ibd_detail = hist.get('ibd_detail', {}).get(base_year, [])
+        cash_eq_detail = hist.get('cash_eq_detail', {}).get(base_year, [])
+        if ibd_detail or cash_eq_detail:
+            with st.expander(f"📋 {base_year}년 순차입금 계산 상세", expanded=False):
+                rows_nd = []
+                for nm, amt in ibd_detail:
+                    rows_nd.append({'구분': 'IBD (이자부부채)', '계정명': nm, '금액(억원)': round(amt / 1e8, 1)})
+                rows_nd.append({'구분': 'IBD 합계', '계정명': '', '금액(억원)': round(ibd_auto / 1e8, 1)})
+                for nm, amt in cash_eq_detail:
+                    rows_nd.append({'구분': '현금성자산', '계정명': nm, '금액(억원)': round(amt / 1e8, 1)})
+                rows_nd.append({'구분': '현금성자산 합계', '계정명': '', '금액(억원)': round(cash_eq_auto / 1e8, 1)})
+                rows_nd.append({'구분': '순차입금 (IBD - 현금성자산)', '계정명': '', '금액(억원)': round(net_debt_auto / 1e8, 1)})
+                st.dataframe(pd.DataFrame(rows_nd), hide_index=True, use_container_width=True)
 
     st.session_state.dcf_assumptions = asmp
     st.divider()
@@ -1438,6 +1455,8 @@ elif page == 'DCF 가정 입력':
 
 # ─── Page 4: DCF 결과 ─────────────────────────────────────────────────────────
 elif page == 'DCF 결과':
+    import streamlit.components.v1 as _comp2
+    _comp2.html("<script>window.parent.document.querySelector('section.main').scrollTo(0,0);</script>", height=0)
     st.header("📈 DCF 분석 결과")
 
     if not st.session_state.historical_summary or not st.session_state.dcf_assumptions:

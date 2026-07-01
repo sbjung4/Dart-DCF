@@ -373,14 +373,16 @@ def _lookup_account(account_map_by_id, category_keys, keywords=None, exclude_key
     return 0.0
 
 
-def _sum_by_keyword(items, sj_div_filter, keywords, exclude_keywords=None):
+def _sum_by_keyword(items, sj_div_filter, keywords, exclude_keywords=None, return_detail=False):
     """Sum thstrm_amount across all distinct line items whose account_nm
     contains any of the given keywords. Used as a last-resort fallback for
     D&A, which is frequently broken out across several note line items
     (e.g. 유형자산 감가상각비, 무형자산상각비, 사용권자산 감가상각비) with no
-    standard XBRL account_id."""
+    standard XBRL account_id.
+    return_detail=True이면 (total, [(account_nm, amount), ...]) 반환."""
     seen = set()
     total = 0.0
+    detail = []
     for item in items:
         if sj_div_filter and item.get('sj_div') != sj_div_filter:
             continue
@@ -396,7 +398,12 @@ def _sum_by_keyword(items, sj_div_filter, keywords, exclude_keywords=None):
         if dedup_key in seen:
             continue
         seen.add(dedup_key)
-        total += _safe_amount(item.get('thstrm_amount', '0'))
+        amt = _safe_amount(item.get('thstrm_amount', '0'))
+        total += amt
+        if return_detail:
+            detail.append((name, amt))
+    if return_detail:
+        return total, detail
     return total
 
 
@@ -504,7 +511,7 @@ def _extract_financials_from_items(items):
     # IBD: 단기차입금, 유동성장기부채, 장기차입금, 금융리스부채, 전환사채(CB),
     #      교환사채(EB), 신주인수권부사채(BW), 일반 사채 등을 모두 합산 (서로
     #      다른 계정이 동시에 존재할 수 있으므로 _sum_by_keyword로 전부 더함)
-    ibd = _sum_by_keyword(bs_items, 'BS', KOREAN_NAME_KEYWORDS['ibd'], IBD_EXCLUDE_KEYWORDS)
+    ibd, ibd_detail = _sum_by_keyword(bs_items, 'BS', KOREAN_NAME_KEYWORDS['ibd'], IBD_EXCLUDE_KEYWORDS, return_detail=True)
 
     # Total debt: XBRL Borrowings 태그는 사채(회사채)를 누락하는 경우가 많음.
     # ibd(단기차입금+유동성장기부채+장기차입금+사채 등 키워드 합산)와 비교해
@@ -517,7 +524,7 @@ def _extract_financials_from_items(items):
     # ibd가 더 크면 ibd 사용 (사채 등 XBRL 태그 누락 항목 보완)
     total_debt = max(total_debt, ibd)
     # 현금성자산: 현금및현금성자산 + 단기금융상품(단기예금 등)
-    cash_equivalents = _sum_by_keyword(bs_items, 'BS', KOREAN_NAME_KEYWORDS['cash_equivalents'], CASH_EQUIV_EXCLUDE_KEYWORDS)
+    cash_equivalents, cash_eq_detail = _sum_by_keyword(bs_items, 'BS', KOREAN_NAME_KEYWORDS['cash_equivalents'], CASH_EQUIV_EXCLUDE_KEYWORDS, return_detail=True)
     if cash_equivalents == 0:
         cash_equivalents = cash
 
@@ -604,7 +611,9 @@ def _extract_financials_from_items(items):
             'total_equity': total_equity,
             'total_debt': total_debt,
             'ibd': ibd,
+            'ibd_detail': ibd_detail,
             'cash_equivalents': cash_equivalents,
+            'cash_eq_detail': cash_eq_detail,
             'net_debt': ibd - cash_equivalents,
             'accounts_receivable': accounts_receivable,
             'inventory': inventory,
