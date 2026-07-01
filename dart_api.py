@@ -864,40 +864,52 @@ def _parse_amount(text):
 def _parse_fs_from_document_xml(root, fs_div='OFS'):
     """감사보고서/사업보고서 원문 XML에서 BS/IS/CF 주요 계정을 추출한다.
 
-    전략:
-    1) 각 섹션 제목("재무상태표" 등) 다음에 오는 첫 번째 TABLE을 해당 섹션 표로 간주.
-    2) 각 행에서 계정명 칸과 금액 칸을 추출. 금액이 여러 열인 경우 첫 번째(당기) 열 사용.
-    3) 미리 정의한 계정 키워드 목록과 부분 일치로 계정을 매핑.
+    전략: 제목 기반 탐지 대신 테이블 내용으로 종류 판별.
+    문서 내 모든 테이블을 순회하며 셀 텍스트에 충분한 수의 시그니처 키워드가
+    포함된 경우 해당 재무제표 테이블로 분류한다 (목차/기타 테이블 오탐 방지).
     """
+    # 각 재무제표 종류를 판별하는 시그니처 키워드 (2개 이상 포함 시 해당 종류로 분류)
+    _BS_SIG  = ['유동자산', '비유동자산', '자산총계', '부채총계', '자본총계', '유동부채', '비유동부채']
+    _IS_SIG  = ['매출액', '영업이익', '당기순이익', '매출원가', '판매비', '영업수익', '법인세비용']
+    _CF_SIG  = ['영업활동', '투자활동', '재무활동', '현금및현금성자산']
+
+    # 모든 테이블 수집
+    all_tables = [el for el in root.iter() if _local_tag(el.tag).lower() == 'table']
+
+    def _table_text(table):
+        rows = _table_rows(table)
+        return ' '.join(_cell_text(c) for tr in rows for c in _row_cells(tr))
+
+    def _count_sig(text, sigs):
+        return sum(1 for kw in sigs if kw in text)
+
+    bs_table = is_table = cf_table = None
+    for ti, table in enumerate(all_tables):
+        txt = _table_text(table)
+        bs_score = _count_sig(txt, _BS_SIG)
+        is_score = _count_sig(txt, _IS_SIG)
+        cf_score = _count_sig(txt, _CF_SIG)
+        if bs_table is None and bs_score >= 3:
+            print(f"[AUDIT_PARSE] table[{ti}] -> BS (score={bs_score}) snippet={txt[:100]!r}")
+            bs_table = table
+        if is_table is None and is_score >= 3:
+            print(f"[AUDIT_PARSE] table[{ti}] -> IS (score={is_score}) snippet={txt[:100]!r}")
+            is_table = table
+        if cf_table is None and cf_score >= 2:
+            print(f"[AUDIT_PARSE] table[{ti}] -> CF (score={cf_score}) snippet={txt[:100]!r}")
+            cf_table = table
+
+    section_tables = {}
+    if bs_table is not None:
+        section_tables['bs'] = bs_table
+    if is_table is not None:
+        section_tables['is'] = is_table
+    if cf_table is not None:
+        section_tables['cf'] = cf_table
+
     result = {'income_statement': {}, 'balance_sheet': {}, 'cash_flow': {}}
     section_map = {'bs': 'balance_sheet', 'is': 'income_statement', 'cf': 'cash_flow'}
 
-    # 섹션별 첫 번째 TABLE 위치 찾기
-    section_tables = {}
-    text_buf = ''
-    BUF = 150
-    current_sections = []
-
-    for el in root.iter():
-        local = _local_tag(el.tag).lower()
-        if local == 'table':
-            for sec in list(current_sections):
-                if sec not in section_tables:
-                    section_tables[sec] = el
-                current_sections = []
-            text_buf = ''
-        else:
-            for txt in ((el.text or '').strip(), (el.tail or '').strip()):
-                if not txt:
-                    continue
-                t_n = _normalize_ws(txt)
-                text_buf = (text_buf + ' ' + t_n)[-BUF:]
-                for sec, kws in _FS_SECTION_KEYWORDS.items():
-                    if sec not in section_tables and any(kw in text_buf for kw in kws):
-                        if sec not in current_sections:
-                            current_sections.append(sec)
-
-    # 각 섹션 표에서 계정 추출
     for sec, table in section_tables.items():
         rows = _table_rows(table)
         if not rows:
@@ -905,27 +917,32 @@ def _parse_fs_from_document_xml(root, fs_div='OFS'):
         # 헤더 행에서 "당기" 컬럼 위치 찾기
         amount_col = None
         data_start = 0
-        for hi, tr in enumerate(rows[:3]):
+        for hi, tr in enumerate(rows[:4]):
             cells = _row_cells(tr)
             texts = [_cell_text(c) for c in cells]
             for ci, t in enumerate(texts):
-                if '당기' in _normalize_ws(t) and '전기' not in _normalize_ws(t):
+                t_n = _normalize_ws(t)
+                if '당기' in t_n and '전기' not in t_n:
                     amount_col = ci
                     data_start = hi + 1
                     break
             if amount_col is not None:
                 break
 
-        # 계정별로 추출할 키워드 목록
         target_accounts = [(key, kws) for (s, key, kws) in _FS_ACCOUNT_KEYWORDS if s == sec]
         section_result = result[section_map[sec]]
+        print(f"[AUDIT_PARSE] sec={sec} amount_col={amount_col} data_start={data_start} rows={len(rows)}")
+
+        for tri, tr in enumerate(rows[data_start:data_start+5]):
+            cells = _row_cells(tr)
+            texts = [_cell_text(c) for c in cells]
+            print(f"[AUDIT_PARSE]   row{tri}: {texts}")
 
         for tr in rows[data_start:]:
             cells = _row_cells(tr)
             texts = [_cell_text(c) for c in cells]
             if len(texts) < 2:
                 continue
-            # 계정명: 첫 번째 비어있지 않은 칸
             acct_name = ''
             for t in texts:
                 if t.strip():
@@ -933,14 +950,12 @@ def _parse_fs_from_document_xml(root, fs_div='OFS'):
                     break
             if not acct_name:
                 continue
-            # 금액: amount_col 위치 or 마지막 칸
             if amount_col is not None and amount_col < len(texts):
                 amt = _parse_amount(texts[amount_col])
             else:
                 amt = _parse_amount(texts[-1])
             if amt is None:
                 continue
-
             for key, kws in target_accounts:
                 if key not in section_result:
                     if any(kw in acct_name for kw in kws):
