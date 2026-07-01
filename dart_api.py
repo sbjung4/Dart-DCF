@@ -1785,3 +1785,34 @@ def build_historical_summary(corp_code: str, years: list, api_key=None, report_t
         })
 
     return pd.DataFrame(rows)
+
+
+def get_shares_outstanding(corp_code, year, api_key=None):
+    """연도별 발행주식수(보통주)를 반환한다.
+
+    DART stockTotqySttus API → 사업보고서 연도 기준 발행주식총수(보통주)를 조회.
+    API가 실패하면 None을 반환한다.
+    """
+    key = get_dart_api_key(api_key)
+    if not key:
+        return None
+    try:
+        url = f"{BASE_URL}/stockTotqySttus.json"
+        params = {"crtfc_key": key, "corp_code": corp_code, "bsns_year": str(year), "reprt_code": "11011"}
+        resp = requests.get(url, params=params, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get('status') != '000':
+            return None
+        # 보통주 발행주식총수 찾기
+        for item in data.get('list', []):
+            stock_knd = (item.get('stock_knd') or '').strip()
+            if '보통주' in stock_knd or stock_knd == '':
+                istc_totqy = (item.get('istc_totqy') or '').replace(',', '').strip()
+                try:
+                    return int(istc_totqy)
+                except ValueError:
+                    continue
+        return None
+    except Exception:
+        return None

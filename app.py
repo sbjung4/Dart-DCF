@@ -35,7 +35,8 @@ def _save_api_key(key):
 
 from dart_api import (
     search_company, get_company_info, get_financial_statements,
-    get_business_segments, get_corp_code_list, get_cost_breakdown
+    get_business_segments, get_corp_code_list, get_cost_breakdown,
+    get_shares_outstanding
 )
 from dcf import DCFModel
 from excel_export import build_excel_workbook
@@ -166,6 +167,9 @@ def extract_historical_summary(financial_data: dict, years: list) -> dict:
         summary['expense_by_nature'][yr] = cost_breakdown.get('expense_by_nature') or {}
         summary['sga_detail'][yr] = cost_breakdown.get('sga_detail') or {}
         summary['cost_breakdown_debug'][yr] = yr_data.get('_cost_breakdown_debug')
+        shares_api = yr_data.get('_shares')
+        if shares_api:
+            summary['shares_outstanding'][yr] = shares_api
 
         rev = is_data.get('revenue', 0)
         cogs = is_data.get('cogs', 0)
@@ -419,6 +423,11 @@ if page == '기업 검색':
                                     except Exception:
                                         fs['_cost_breakdown'] = {'expense_by_nature': {}, 'sga_detail': {}}
                                     fs['_cost_breakdown_debug'] = cost_debug
+
+                                    try:
+                                        fs['_shares'] = get_shares_outstanding(corp_code, yr, api_key)
+                                    except Exception:
+                                        fs['_shares'] = None
                             except Exception as e:
                                 st.warning(f"{yr}년 데이터 로드 실패: {str(e)}")
                                 financial_data[str(yr)] = {}
@@ -840,16 +849,6 @@ elif page == 'DCF 가정 입력':
     sga_detail_by_year = hist.get('sga_detail', {})
     all_nature_items = sorted({item for yr in hist_years for item in expense_by_nature_by_year.get(yr, {})})
     all_sga_items = sorted({item for yr in hist_years for item in sga_detail_by_year.get(yr, {})})
-
-    cost_dbg = hist.get('cost_breakdown_debug', {})
-    with st.expander("🔍 비용 항목 추출 진단 정보 (항목표가 안 보일 때 펼치세요)", expanded=not (all_nature_items or all_sga_items)):
-        for yr in hist_years:
-            dbg = cost_dbg.get(yr)
-            if dbg:
-                st.write(f"**{yr}년**")
-                st.json(dbg)
-            else:
-                st.write(f"**{yr}년**: 진단 데이터 없음 (조회 전이거나 비용 항목 fetch가 포함 안 된 버전)")
 
     if all_nature_items or all_sga_items:
         st.markdown("**🧾 비용 항목별 세부 (주석 기준, 당기)**")
@@ -1419,12 +1418,27 @@ elif page == 'DCF 가정 입력':
 
     # ── 8. 기타 ──────────────────────────────────────────────────────────────
     st.subheader("9. 기타")
+
+    # 자동 조회 주식수: hist에서 가장 최근 연도 값 사용
+    auto_shares = 0
+    for yr in sorted(hist.get('shares_outstanding', {}).keys(), reverse=True):
+        v = hist['shares_outstanding'].get(yr, 0)
+        if v and v > 0:
+            auto_shares = v
+            break
+    # 처음 조회 시 자동값으로 채우기 (사용자가 이미 수정한 경우 덮어쓰지 않음)
+    if auto_shares > 0 and asmp.get('shares_outstanding', 0) == 0:
+        asmp['shares_outstanding'] = float(auto_shares)
+
     col1, col2 = st.columns(2)
     with col1:
-        asmp['shares_outstanding'] = st.number_input("발행주식수 (주)",
+        shares_label = "발행주식수 (주)"
+        if auto_shares > 0:
+            shares_label += f"  ✅ 자동 조회: {auto_shares:,}주"
+        asmp['shares_outstanding'] = st.number_input(shares_label,
                                                        value=float(asmp.get('shares_outstanding', 0)),
                                                        step=1000.0,
-                                                       help="총 발행주식수 입력 시 주당가치 자동 계산")
+                                                       help="DART stockTotqySttus API 자동 조회. 수정 가능.")
     with col2:
         net_debt_auto = hist['net_debt'].get(base_year, 0)
         st.metric("자동 산출 순차입금 (IBD-현금성자산)", f"{fmt_억(net_debt_auto)}억원",
